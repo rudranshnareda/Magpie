@@ -350,6 +350,11 @@ ipcMain.on('shell:reveal', (_, file) => file && shell.showItemInFolder(file));
 ipcMain.handle('settings:get', () => store.publicSettings());
 ipcMain.handle('settings:set', (_, patch) => {
   delete patch.secrets;
+  delete patch.modelCache;
+  // changing the model, address or command means the last successful Test no longer applies
+  for (const vals of Object.values(patch.providers || {})) {
+    if (('model' in vals || 'baseUrl' in vals || 'command' in vals) && !('verified' in vals)) vals.verified = false;
+  }
   store.setSettings(patch);
   if ('openAtLogin' in patch && app.isPackaged) app.setLoginItemSettings({ openAtLogin: !!patch.openAtLogin, args: ['--hidden'] });
   return store.publicSettings();
@@ -369,10 +374,30 @@ ipcMain.on('settings:openVault', () => shell.openPath(vault.vaultDir()));
 ipcMain.handle('provider:registry', () => providers.publicRegistry());
 ipcMain.handle('provider:setKey', (_, { id, key }) => {
   store.setSecret(id, (key || '').trim());
+  store.setSettings({ providers: { [id]: { verified: false } } }); // a new key has not been tested yet
   return store.publicSettings();
 });
-ipcMain.handle('provider:test', (_, id) => engine.test(store.currentProvider(id)));
-ipcMain.handle('provider:models', (_, id) => engine.listOllama(store.currentProvider(id).baseUrl));
+ipcMain.handle('provider:test', async (_, id) => {
+  const r = await engine.test(store.currentProvider(id));
+  store.setSettings({ providers: { [id]: { verified: !!r.ok } } }); // remembered so the guide can show "Ready"
+  return r;
+});
+// Live model list from the provider, cached for a day so Settings opens instantly. `force` re-fetches.
+ipcMain.handle('provider:models', async (_, { id, force } = {}) => {
+  const cache = store.getModelCache(id);
+  if (!force && cache && Date.now() - cache.ts < 24 * 3600 * 1000) return { ok: true, models: cache.list, source: 'cache', ts: cache.ts };
+  const r = await engine.listModels(store.currentProvider(id));
+  if (r.ok && r.models.length) {
+    store.setModelCache(id, r.models);
+    return { ok: true, models: r.models, source: 'live', ts: Date.now() };
+  }
+  return { ok: r.ok, models: cache ? cache.list : [], source: cache ? 'cache' : 'builtin', ts: cache ? cache.ts : 0, error: r.error };
+});
+// Open a provider's sign-up page. Only the address stored in our own registry can be opened.
+ipcMain.on('guide:open', (_, id) => {
+  const url = providers.byId(id).guide?.url;
+  if (url && url.startsWith('https://')) shell.openExternal(url);
+});
 
 // ---------------------------------------------------------------- updates
 function announceUpdate() {

@@ -16,7 +16,7 @@ You ask an AI something. It writes a big answer full of words you don't know. If
 
 1. Download `Magpie-Setup-<version>.exe` from the [latest release](https://github.com/rudranshnareda/Magpie/releases/latest).
 2. Run it. It installs for your user only and needs no admin rights.
-3. Open **Settings** and choose your AI engine (see below).
+3. Open **Settings**, follow the short guide for the Groq engine (free, about a minute), and press **Test**.
 
 The installer is not code-signed, so Windows SmartScreen may say "Windows protected your PC". Choose **More info**, then **Run anyway**. You can verify the download against the SHA-256 listed in the release notes.
 
@@ -80,21 +80,28 @@ Dig-deeper notes link back to their parent, so your rabbit hole becomes a tree y
 
 ## Choose your AI engine
 
-Settings → **AI engine**. Pick a provider, type any model name it supports, and press **Test** to time a tiny request.
+Settings → **AI engine**. Pick a provider and Magpie shows a short **setup guide** for it: the steps, a button that opens the right sign-up page, and live ticks for *API key saved*, *Model chosen* and *Tested*. Once a provider passes **Test**, the guide folds away into a green *Ready to use*.
+
+**Start with Groq.** It is the default: free, and answers start in well under a second (about 0.7 s to the first word in testing). Open Settings, press **Open the Groq console**, create an API key, paste it in and press **Test**. `openai/gpt-oss-120b` gives the best answers and `openai/gpt-oss-20b` is the fastest.
+
+**Models stay current on their own.** The built-in model list is only a starting point. As soon as your key is saved, Magpie asks the provider what it offers right now and shows that live list in the **Model** dropdown, with the recommended models first. New releases appear without a Magpie update. The list is cached for a day, press the refresh button next to **Model** to fetch it again, and you can always type any model name by hand. Speech, embedding and safety-classifier models are hidden.
 
 | Provider | What you need | Status |
 | --- | --- | --- |
+| **Groq** (default) | Free API key | Tested live |
 | Claude Code | [Claude Code](https://claude.com/claude-code) installed and signed in | Tested |
-| OpenAI-compatible (OpenAI, OpenRouter, Groq, others) | API key (and server address for "other") | Tested against a mock server |
+| OpenAI, OpenRouter, other OpenAI-compatible | API key (and server address for "other") | Tested against a mock server |
 | Ollama, LM Studio (local) | The server running | Tested against a mock server |
 | Custom command | Any program that reads the prompt on stdin and prints the answer | Tested |
 | Anthropic API | API key | Implemented to the documented API, not yet tested live |
-| Google Gemini API | API key | Implemented to the documented API, not yet tested live |
+| Google Gemini API (free tier) | API key | Implemented to the documented API, not yet tested live |
 | Gemini CLI, Codex CLI | The CLI installed and signed in | Implemented, not yet tested live |
 
 If you try one of the untested providers, please open an issue and say whether it worked.
 
-**Speed.** Claude Code takes a few seconds to start, and Magpie starts it the moment you open the prompt so it is ready by the time you press Return. Direct API providers (Groq, Gemini Flash, Anthropic API) and local models avoid that start-up and are usually quicker and steadier.
+**Speed.** Direct API providers such as Groq answer in about a second or less. Claude Code takes a few seconds to start, and Magpie starts it the moment you open the prompt so it is ready by the time you press Return, but it is still the slowest option.
+
+**Free tiers.** Free plans have rate limits, and some providers may use free-tier prompts to improve their products (Google says so for the Gemini free tier). Read your provider's terms before sending anything sensitive.
 
 **API keys** are stored encrypted with Windows DPAPI and are never shown again after you save them.
 

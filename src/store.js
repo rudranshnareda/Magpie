@@ -12,8 +12,9 @@ const DEFAULTS = {
   openAtLogin: false,
   autoUpdateCheck: true, // once a day, ask GitHub whether a newer release exists (never installs by itself)
   lastUpdateCheck: 0,
-  provider: 'claude-cli',
-  providers: {}, // id -> { model, baseUrl, command }
+  provider: 'groq', // free and answers in under a second
+  providers: {}, // id -> { model, baseUrl, command, verified }
+  modelCache: {}, // id -> { ts, list }: the provider's live model list
   secrets: {}, // id -> encrypted API key (never sent to the UI)
   log: {
     enabled: true, // master switch: keep a history at all
@@ -60,6 +61,7 @@ function getSettings() {
       ...base,
       providers: { ...(base.providers || {}) },
       secrets: { ...(base.secrets || {}) },
+      modelCache: { ...(base.modelCache || {}) },
       log: { ...DEFAULTS.log, ...(base.log || {}) },
     };
     // v0.2 stored a single "model" for Claude Code
@@ -73,11 +75,19 @@ function setSettings(patch) {
   const next = { ...cur, ...patch, log: { ...cur.log, ...(patch.log || {}) }, providers: { ...cur.providers } };
   delete next.secrets; // secrets only change through setSecret
   next.secrets = cur.secrets;
+  next.modelCache = cur.modelCache; // the cache only changes through setModelCache
   for (const [id, vals] of Object.entries(patch.providers || {})) next.providers[id] = { ...(cur.providers[id] || {}), ...vals };
   settings = next;
   writeJson(settingsFile(), settings);
   return settings;
 }
+
+function setModelCache(id, list) {
+  const s = getSettings();
+  s.modelCache[id] = { ts: Date.now(), list };
+  writeJson(settingsFile(), s);
+}
+const getModelCache = (id) => getSettings().modelCache[id] || null;
 
 // ---- API keys: encrypted with Windows DPAPI via Electron's safeStorage --------------------
 function setSecret(id, value) {
@@ -145,6 +155,6 @@ function clearHistory() {
 }
 
 module.exports = {
-  getSettings, setSettings, publicSettings, setSecret, currentProvider,
+  getSettings, setSettings, publicSettings, setSecret, currentProvider, setModelCache, getModelCache,
   getHistory, addEntry, updateEntry, deleteEntry, clearHistory, shotsDir,
 };

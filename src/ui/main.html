@@ -51,7 +51,7 @@
   .wrap { width: min(680px, calc(100% - 64px)); }
   .group { margin-top: 26px; }
   .group h3 { margin: 0 0 7px 14px; font-size: 12px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; color: var(--text-2); }
-  .list { background: var(--card); border-radius: 18px; box-shadow: inset 0 0 0 .5px var(--hairline), var(--shadow); overflow: hidden; }
+  .list { background: var(--card); border-radius: 18px; box-shadow: inset 0 0 0 .5px var(--hairline), var(--shadow); }
   .row { display: flex; align-items: center; gap: 16px; padding: 11px 16px; min-height: 52px; }
   .row + .row { border-top: 1px solid var(--sep); }
   .row .l { flex: 1; min-width: 0; }
@@ -70,6 +70,31 @@
   .seg button { -webkit-app-region: no-drag; }
   .bar { height: 6px; border-radius: 3px; background: var(--fill); overflow: hidden; margin-top: 9px; max-width: 320px; display: none; }
   .bar i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 3px; transition: width .25s; }
+  /* setup guide */
+  .row.guide { display: block; padding: 15px 16px; }
+  .guide .gt { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .guide .gt b { font-size: 15px; font-weight: 600; }
+  .guide .gt span { color: var(--text-2); font-size: 12.5px; }
+  .guide ol { margin: 10px 0 0; padding-left: 20px; font-size: 13.5px; line-height: 1.55; }
+  .guide li { margin: 4px 0; padding-left: 2px; }
+  .guide code { font: 12.5px var(--mono); background: var(--fill); padding: 1px 6px; border-radius: 6px; }
+  .guide .gact { margin-top: 12px; }
+  .guide .gstatus { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
+  .guide .gtip { margin-top: 12px; background: var(--fill); border-radius: 12px; padding: 10px 13px; color: var(--text-2); font-size: 12.5px; line-height: 1.5; }
+  /* model picker */
+  .combo { position: relative; display: flex; align-items: center; gap: 2px; }
+  .row .combo input[type=text] { width: 214px; }
+  .btn.icon { width: 30px; padding: 0; justify-content: center; }
+  .btn.icon:disabled { opacity: .4; }
+  .menu { display: none; position: absolute; right: 0; top: calc(100% + 8px); width: 360px; max-height: 280px; overflow: auto; z-index: 15; padding: 4px;
+    background: color-mix(in srgb, Canvas 97%, transparent); border-radius: 14px; box-shadow: 0 0 0 .5px var(--sep), 0 12px 36px rgba(0,0,0,.28); backdrop-filter: blur(20px); }
+  .menu .mh { padding: 8px 10px; font-size: 11.5px; color: var(--text-2); }
+  .menu .mi { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 7px 10px; border-radius: 9px; cursor: pointer; font-size: 13px; }
+  .menu .mi span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .menu .mi small { color: var(--accent); font-size: 11px; flex: none; }
+  .menu .mi.cur { font-weight: 600; }
+  .menu .mi:hover { background: var(--accent); color: #fff; }
+  .menu .mi:hover small { color: rgba(255,255,255,.85); }
   .pill { background: var(--accent-soft) !important; color: var(--accent) !important; font-weight: 600; }
   .pill:hover { background: var(--accent-soft-2) !important; }
 </style></head>
@@ -101,9 +126,14 @@
 <section id="set"><div class="wrap">
   <h1 style="margin:6px 0 0">Settings</h1>
 
-  <div class="group"><h3>AI engine</h3><div class="list">
+  <div class="group"><h3>AI engine</h3><div class="list" id="engine-list">
     <div class="row"><div class="l"><b>Provider</b><small id="prov-hint"></small></div><select id="provider"></select></div>
-    <div class="row hide" id="r-model"><div class="l"><b>Model</b><small id="model-hint">Type any model name the provider supports.</small></div><input type="text" id="f-model" list="models" autocomplete="off" spellcheck="false"><datalist id="models"></datalist></div>
+    <div class="row guide" id="r-guide"></div>
+    <div class="row hide" id="r-model"><div class="l"><b>Model</b><small id="model-hint"></small></div>
+      <div class="combo"><input type="text" id="f-model" autocomplete="off" spellcheck="false" placeholder="Choose or type a model">
+        <button class="btn ghost icon" id="model-refresh" title="Refresh the list from the provider"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 11-3-6.7"/><path d="M21 4v5h-5"/></svg></button>
+        <button class="btn ghost icon" id="model-toggle" title="Show models"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
+        <div class="menu" id="model-menu"></div></div></div>
     <div class="row hide" id="r-baseUrl"><div class="l"><b>Server address</b></div><input type="text" id="f-baseUrl" spellcheck="false"></div>
     <div class="row hide" id="r-apiKey"><div class="l"><b>API key</b><small>Stored encrypted on this PC. Never shown again.</small></div><input type="password" id="f-apiKey" autocomplete="off"><button class="btn ghost danger" id="rmkey">Remove</button></div>
     <div class="row hide" id="r-command"><div class="l"><b>Command</b><small id="cmd-hint"></small></div><input type="text" id="f-command" spellcheck="false"></div>
@@ -192,7 +222,9 @@ function drawDetail() {
   if (!e) {
     $('detail').innerHTML = `<div class="empty"><svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20C4 10 10 4 20 4c0 10-6 16-16 16z"/><path d="M4 20l9-9"/></svg>
       <h3>${entries.length ? 'Pick a question' : 'Nothing here yet'}</h3>${entries.length ? 'Choose one on the left to read it again.' :
-      `Select text anywhere and click <b>Ask Magpie</b>, or press <kbd>${esc(pretty(settings?.hotkey || ''))}</kbd> and type a question. Everything you ask lands here.`}</div>`;
+      `Select text anywhere and click <b>Ask Magpie</b>, or press <kbd>${esc(pretty(settings?.hotkey || ''))}</kbd> and type a question. Everything you ask lands here.`}
+      ${!entries.length && settings && !settings.providers?.[settings.provider]?.verified ? `<div style="margin-top:22px"><div style="margin-bottom:10px">First, choose an AI engine. Groq is free and takes about a minute to set up.</div><button class="btn primary" id="setup-cta">Set up your AI engine</button></div>` : ''}</div>`;
+    const cta = $('setup-cta'); if (cta) cta.onclick = () => { tab('set'); $('engine-list').scrollIntoView({ block: 'start', behavior: 'smooth' }); };
     return;
   }
   $('detail').innerHTML = `
@@ -232,16 +264,91 @@ $('openv').onclick = () => magpie.send('settings:openVault');
 $('clear').onclick = async () => { if (confirm('Delete ALL history and screenshots? Saved vault notes are kept.')) { await magpie.invoke('history:clear'); selId = null; load(); } };
 
 /* ---------- settings: AI engine ---------- */
-const GROUPS = { app: 'Apps on this PC', cloud: 'Cloud APIs', local: 'Run on this PC' };
-let reg = null;
+const GROUPS = { free: 'Free & fast', cloud: 'Other cloud APIs', app: 'Apps on this PC', local: 'Run on this PC' };
+let reg = null, guideOpen = true, live = { models: [], source: 'builtin', ts: 0, error: '' };
+const ago = (ts) => { const m = Math.round((Date.now() - ts) / 60000); return m < 1 ? 'just now' : m < 60 ? m + ' min ago' : Math.round(m / 60) + ' h ago'; };
+const savedOf = () => settings.providers[reg.id] || {};
+const curModel = () => savedOf().model ?? reg.defaults.model ?? '';
+
 function buildProviderSelect() {
   $('provider').innerHTML = Object.entries(GROUPS).map(([g, name]) =>
-    `<optgroup label="${name}">${registry.filter((p) => p.group === g).map((p) => `<option value="${p.id}">${esc(p.label)}</option>`).join('')}</optgroup>`).join('');
+    `<optgroup label="${name}">${registry.filter((p) => p.group === g).map((p) => `<option value="${p.id}">${esc(p.label)}${p.badge ? ' (' + esc(p.badge) + ')' : ''}</option>`).join('')}</optgroup>`).join('');
   $('provider').value = settings.provider;
 }
+
+/* --- the setup guide: shown for whichever provider is chosen --- */
+function renderGuide() {
+  const g = reg.guide, el = $('r-guide'), s = savedOf();
+  if (!g) { el.style.display = 'none'; return; }
+  el.style.display = '';
+  const needsKey = reg.fields.includes('apiKey') && !reg.noKey;
+  const hasKey = !!settings.keySet?.[reg.id];
+  const verified = !!s.verified;
+  if (verified && !guideOpen) {
+    el.innerHTML = `<div class="gt"><b class="ok">Ready to use</b><span>${esc(reg.label)}${curModel() ? ' · ' + esc(curModel()) : ''}</span><span style="flex:1"></span><button class="btn ghost" id="g-toggle">Show setup guide</button></div>`;
+  } else {
+    const code = (t) => esc(t).replace(/`([^`]+)`/g, '<code>$1</code>');
+    const chips = [];
+    if (needsKey) chips.push(hasKey ? '<span class="chip ok">API key saved</span>' : '<span class="chip">API key needed</span>');
+    if (reg.fields.includes('model')) chips.push(curModel() ? '<span class="chip ok">Model chosen</span>' : '<span class="chip">Choose a model</span>');
+    chips.push(verified ? '<span class="chip ok">Tested</span>' : '<span class="chip">Not tested yet</span>');
+    el.innerHTML = `<div class="gt"><b>Set up ${esc(reg.label)}</b><span>${esc(g.time || '')}</span><span style="flex:1"></span>${verified ? '<button class="btn ghost" id="g-toggle">Hide guide</button>' : ''}</div>
+      <ol>${g.steps.map((t) => `<li>${code(t)}</li>`).join('')}</ol>
+      ${g.url ? `<div class="gact"><button class="btn primary" id="g-open">${esc(g.urlLabel || 'Open page')}</button></div>` : ''}
+      <div class="gstatus">${chips.join('')}</div>
+      ${g.tip ? `<div class="gtip">${code(g.tip)}</div>` : ''}`;
+  }
+  const t = $('g-toggle'); if (t) t.onclick = () => { guideOpen = !guideOpen; renderGuide(); };
+  const o = $('g-open'); if (o) o.onclick = () => magpie.send('guide:open', reg.id);
+}
+
+/* --- model picker: your typed value, plus the provider's live list --- */
+function modelOptions() {
+  const rec = reg.models;
+  if (!live.models.length) return rec;
+  const have = new Set(live.models), top = rec.filter((m) => have.has(m));
+  return [...top, ...live.models.filter((m) => !top.includes(m))];
+}
+function drawMenu() {
+  const typed = $('f-model').value.trim().toLowerCase(), cur = curModel();
+  const all = modelOptions();
+  const list = typed && typed !== cur.toLowerCase() ? all.filter((m) => m.toLowerCase().includes(typed)) : all;
+  const head = live.source === 'live' ? `Live from ${esc(reg.label)} · updated just now`
+    : live.source === 'cache' ? `From ${esc(reg.label)} · updated ${ago(live.ts)}`
+    : `Built-in suggestions. ${reg.noKey || settings.keySet?.[reg.id] ? 'Press the refresh button for the live list.' : 'Save your key, then refresh for the live list.'}`;
+  $('model-menu').innerHTML = `<div class="mh">${head}</div>` +
+    (list.length ? list.map((m) => `<div class="mi${m === cur ? ' cur' : ''}" data-m="${esc(m)}"><span>${esc(m)}</span>${reg.models.includes(m) ? '<small>recommended</small>' : m === cur ? '<small>current</small>' : ''}</div>`).join('')
+      : `<div class="mh">${live.error ? esc(live.error) : 'No match. Your typed name will be used as is.'}</div>`);
+}
+function openMenu() { drawMenu(); $('model-menu').style.display = 'block'; }
+function closeMenu() { $('model-menu').style.display = 'none'; }
+$('model-toggle').onclick = (e) => { e.stopPropagation(); $('model-menu').style.display === 'block' ? closeMenu() : (($('f-model').focus(), openMenu())); };
+$('f-model').addEventListener('input', () => { if ($('model-menu').style.display === 'block') drawMenu(); else openMenu(); });
+$('f-model').addEventListener('focus', openMenu);
+$('f-model').addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMenu(); if (e.key === 'Enter') { closeMenu(); $('f-model').blur(); } });
+$('model-menu').addEventListener('mousedown', (e) => e.preventDefault()); // keep focus in the box while clicking
+$('model-menu').addEventListener('click', (e) => { const it = e.target.closest('.mi'); if (!it) return; $('f-model').value = it.dataset.m; closeMenu(); commitField('model'); });
+document.addEventListener('click', (e) => { if (!e.target.closest('.combo')) closeMenu(); });
+
+async function fetchModels(force) {
+  const id = reg.id, ok = reg.noKey || settings.keySet?.[id];
+  if (!ok && !force) { live = { models: [], source: 'builtin', ts: 0, error: '' }; $('model-hint').textContent = 'Type any model name, or pick a suggestion.'; return; }
+  $('model-hint').textContent = 'Loading the model list…';
+  const r = await magpie.invoke('provider:models', { id, force: !!force });
+  if (reg.id !== id) return;
+  live = { models: r.models || [], source: r.source, ts: r.ts, error: r.error || '' };
+  const n = live.models.length;
+  $('model-hint').textContent = r.source === 'live' ? `${n} models, live from ${reg.label}. Click the box to choose.`
+    : r.source === 'cache' ? (r.error ? `${n} models from ${ago(r.ts)}. Could not refresh: ${r.error}` : `${n} models, updated ${ago(r.ts)}. Press refresh for the latest.`)
+    : (r.error || 'Type any model name, or pick a suggestion.');
+  if (n && !$('f-model').value) { $('f-model').value = modelOptions()[0]; commitField('model'); } // local servers start with no model chosen
+  if ($('model-menu').style.display === 'block') drawMenu();
+}
+$('model-refresh').onclick = async () => { const b = $('model-refresh'); b.disabled = true; await fetchModels(true); b.disabled = false; };
+
 async function renderEngine() {
   reg = registry.find((p) => p.id === settings.provider) || registry[0];
-  const saved = settings.providers[reg.id] || {};
+  const saved = savedOf();
   $('provider').value = reg.id;
   $('prov-hint').textContent = reg.hint || '';
   for (const f of ['model', 'baseUrl', 'apiKey', 'command']) $('r-' + f).classList.toggle('hide', !reg.fields.includes(f));
@@ -252,20 +359,19 @@ async function renderEngine() {
   $('f-apiKey').value = ''; $('f-apiKey').placeholder = has ? '••••••••••••  (saved)' : reg.noKey ? 'Optional' : 'Paste your key';
   $('rmkey').style.display = has ? '' : 'none';
   $('cmd-hint').textContent = reg.id === 'custom-cli' ? 'The prompt is sent on stdin; the answer is read from stdout.' : 'Change only if the program is not on your PATH.';
-  $('models').innerHTML = reg.models.map((m) => `<option value="${esc(m)}">`).join('');
-  $('model-hint').textContent = 'Type any model name the provider supports.';
   $('test-out').className = ''; $('test-out').textContent = 'Sends a tiny request and times it.';
-  if (reg.listModels) {
-    const r = await magpie.invoke('provider:models', reg.id);
-    if (reg.id !== settings.provider) return;
-    $('models').innerHTML = r.models.map((m) => `<option value="${esc(m)}">`).join('');
-    $('model-hint').textContent = r.ok ? (r.models.length ? `${r.models.length} model${r.models.length > 1 ? 's' : ''} found on this PC. Click the box to choose.` : 'Server is running but has no models yet.') : r.error;
-    if (r.ok && r.models.length && !$('f-model').value) { $('f-model').value = r.models[0]; save({ providers: { [reg.id]: { model: r.models[0] } } }); }
-  }
+  guideOpen = !saved.verified;
+  closeMenu(); renderGuide();
+  live = { models: [], source: 'builtin', ts: 0, error: '' };
+  if (reg.fields.includes('model')) await fetchModels(false);
+}
+async function commitField(f) {
+  await save({ providers: { [reg.id]: { [f]: $('f-' + f).value.trim() } } });
+  renderGuide();
 }
 $('provider').onchange = async () => { await save({ provider: $('provider').value }); renderEngine(); };
-for (const f of ['model', 'baseUrl', 'command']) $('f-' + f).addEventListener('change', () => save({ providers: { [reg.id]: { [f]: $('f-' + f).value.trim() } } }));
-$('f-apiKey').addEventListener('change', async () => { const key = $('f-apiKey').value; if (!key.trim()) return; settings = await magpie.invoke('provider:setKey', { id: reg.id, key }); renderEngine(); });
+for (const f of ['model', 'baseUrl', 'command']) $('f-' + f).addEventListener('change', async () => { await commitField(f); if (f === 'baseUrl') fetchModels(true); });
+$('f-apiKey').addEventListener('change', async () => { const key = $('f-apiKey').value; if (!key.trim()) return; settings = await magpie.invoke('provider:setKey', { id: reg.id, key }); await renderEngine(); fetchModels(true); });
 $('rmkey').onclick = async () => { settings = await magpie.invoke('provider:setKey', { id: reg.id, key: '' }); renderEngine(); };
 $('test').onclick = async () => {
   const b = $('test'), out = $('test-out');
@@ -275,6 +381,9 @@ $('test').onclick = async () => {
   b.disabled = false;
   if (r.ok) { out.className = 'ok'; out.textContent = `Working. First word in ${(r.firstMs / 1000).toFixed(1)} s, finished in ${(r.ms / 1000).toFixed(1)} s.`; }
   else { out.className = 'bad'; out.textContent = r.error; }
+  settings = await magpie.invoke('settings:get');
+  guideOpen = !r.ok; renderGuide(); drawDetail();
+  if (r.ok && !live.models.length && (reg.noKey || settings.keySet?.[reg.id])) fetchModels(true);
 };
 
 /* ---------- settings: shortcut recorder ---------- */

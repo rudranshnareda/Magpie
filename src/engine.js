@@ -212,7 +212,7 @@ function viaOpenAI(prompt, onDelta, cfg) {
 function viaAnthropic(prompt, onDelta, cfg) {
   needKey(cfg); needModel(cfg);
   return viaHttp((signal, emit) =>
-    sse('https://api.anthropic.com/v1/messages', {
+    sse(`${(cfg.baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '')}/v1/messages`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-api-key': cfg.apiKey, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({ model: cfg.model, max_tokens: 800, stream: true, system: SYSTEM, messages: [{ role: 'user', content: prompt }] }),
@@ -223,7 +223,7 @@ function viaAnthropic(prompt, onDelta, cfg) {
 }
 function viaGemini(prompt, onDelta, cfg) {
   needKey(cfg); needModel(cfg);
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(cfg.model)}:streamGenerateContent?alt=sse`;
+  const url = `${(cfg.baseUrl || 'https://generativelanguage.googleapis.com').replace(/\/+$/, '')}/v1beta/models/${encodeURIComponent(cfg.model)}:streamGenerateContent?alt=sse`;
   return viaHttp((signal, emit) =>
     sse(url, {
       method: 'POST',
@@ -274,14 +274,60 @@ async function test(cfg) {
   }
 }
 
-async function listOllama(baseUrl) {
-  const root = (baseUrl || 'http://localhost:11434/v1').replace(/\/v1\/?$/, '').replace(/\/+$/, '');
+// ---- live model lists ---------------------------------------------------------------------
+// New models appear on their own: once a key is saved we ask the provider what it offers right now.
+// Things that are not chat models (speech, embeddings, safety classifiers, image models) are hidden.
+const NOT_CHAT = /whisper|tts|orpheus|embed|guard|moderation|dall-e|imagen|image|transcri|audio|realtime|rerank|safeguard|speech|veo|lyria|aqa|^text-/i;
+
+async function getJson(url, headers, what) {
+  let res;
   try {
-    const r = await fetch(root + '/api/tags', { signal: AbortSignal.timeout(2500) });
-    const j = await r.json();
-    return { ok: true, models: (j.models || []).map((m) => m.name) };
+    res = await fetch(url, { headers, signal: AbortSignal.timeout(8000) });
   } catch {
-    return { ok: false, models: [], error: 'Could not reach the server. Is it running?' };
+    throw new Error(`Could not reach ${what}.`);
+  }
+  if (res.status === 401 || res.status === 403) throw new Error('The API key was rejected. Check that it is correct and still active.');
+  if (!res.ok) throw new Error(`${what} answered with an error (${res.status}).`);
+  return res.json();
+}
+const tidy = (ids) => [...new Set(ids)].filter((id) => id && !NOT_CHAT.test(id)).sort((a, b) => a.localeCompare(b));
+
+async function listModels(cfg) {
+  try {
+    switch (cfg.type) {
+      case 'claude-cli':
+        return { ok: true, models: ['haiku', 'sonnet', 'opus'] };
+      case 'openai': {
+        if (!cfg.baseUrl) throw new Error('Set the server address first.');
+        needKey(cfg);
+        const base = cfg.baseUrl.replace(/\/+$/, '');
+        const h = cfg.apiKey ? { authorization: `Bearer ${cfg.apiKey}` } : {};
+        let j;
+        try {
+          j = await getJson(base + '/models', h, cfg.label);
+        } catch (e) {
+          if (cfg.id !== 'ollama') throw e;
+          j = await getJson(base.replace(/\/v1$/, '') + '/api/tags', h, cfg.label); // older Ollama
+          return { ok: true, models: tidy((j.models || []).map((m) => m.name)) };
+        }
+        return { ok: true, models: tidy((j.data || []).map((m) => m.id)) };
+      }
+      case 'anthropic': {
+        needKey(cfg);
+        const j = await getJson(`${(cfg.baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '')}/v1/models?limit=100`, { 'x-api-key': cfg.apiKey, 'anthropic-version': '2023-06-01' }, cfg.label);
+        return { ok: true, models: tidy((j.data || []).map((m) => m.id)) };
+      }
+      case 'gemini': {
+        needKey(cfg);
+        const j = await getJson(`${(cfg.baseUrl || 'https://generativelanguage.googleapis.com').replace(/\/+$/, '')}/v1beta/models?pageSize=200`, { 'x-goog-api-key': cfg.apiKey }, cfg.label);
+        const ids = (j.models || []).filter((m) => (m.supportedGenerationMethods || []).includes('generateContent')).map((m) => String(m.name).replace(/^models\//, ''));
+        return { ok: true, models: tidy(ids) };
+      }
+      default:
+        return { ok: true, models: [] }; // command-line tools have no model list
+    }
+  } catch (e) {
+    return { ok: false, models: [], error: e.message };
   }
 }
 
@@ -289,4 +335,4 @@ function shutdown() {
   for (const [m, e] of [...spares]) dropSpare(m, e);
 }
 
-module.exports = { explain, prewarm, test, listOllama, shutdown, SYSTEM };
+module.exports = { explain, prewarm, test, listModels, shutdown, SYSTEM };
