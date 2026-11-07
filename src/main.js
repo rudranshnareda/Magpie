@@ -26,6 +26,13 @@ let hookRunning = false;
 let lastFire = 0;
 const quickCtx = new Map(); // BrowserWindow -> { app, shot, selection, parent, title, entryId, job }
 
+// Optional timing trace for diagnosing slowness: set MAGPIE_TRACE to a file path. Off by default.
+let T0 = 0;
+const trace = (label) => {
+  if (!process.env.MAGPIE_TRACE) return;
+  try { fs.appendFileSync(process.env.MAGPIE_TRACE, `${Date.now() - T0}\t${label}\n`); } catch {}
+};
+
 const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const titleFor = (question, selection) => vault.safe((question || selection || 'untitled').slice(0, 60));
 const dark = () => nativeTheme.shouldUseDarkColors;
@@ -62,72 +69,163 @@ const notifyHistory = () => mainWin && !mainWin.isDestroyed() && mainWin.webCont
 
 // ---------------------------------------------------------------- quick (prompt + answer) window
 const QUICK_W = 640;
-function openQuick({ question = '', selection = '', app: appInfo = {}, shot = null, parent = null, mode = 'center', offset = 0, autoAsk = false }) {
-  const h = 64; // content-sized: the page reports its real height right after it loads
-  const pt = screen.getCursorScreenPoint();
-  const d = screen.getDisplayNearestPoint(pt).workArea;
-  let x, y;
-  if (mode === 'center') {
-    x = Math.round(d.x + (d.width - QUICK_W) / 2);
-    y = Math.round(d.y + d.height * 0.2);
-  } else {
-    x = Math.min(Math.max(pt.x + 14 + offset, d.x), d.x + d.width - QUICK_W);
-    y = Math.min(Math.max(pt.y + 18 + offset, d.y), d.y + d.height - 180);
-  }
+const engineLabel = (cfg) => (cfg.model ? `${cfg.label} · ${cfg.model}` : cfg.label);
+
+// A hidden, fully loaded popup is kept ready, so the shortcut only has to SHOW it. Creating and loading a fresh
+// window cost 150 to 200 ms every single time. A new spare is prepared right after each one is used.
+let spare = null;
+function createQuickWindow() {
   const win = new BrowserWindow({
-    width: QUICK_W, height: h, x, y, frame: false, alwaysOnTop: true, skipTaskbar: true, resizable: false, show: false, icon: ICON,
+    width: QUICK_W, height: 64, frame: false, alwaysOnTop: true, skipTaskbar: true, resizable: false, show: false, icon: ICON,
     ...material('acrylic'),
     webPreferences: { preload: PRELOAD, contextIsolation: true },
   });
   win.setAlwaysOnTop(true, 'screen-saver');
+  let n = 0;
+  const ready = new Promise((res) => {
+    const one = () => ++n === 2 && res();
+    win.once('ready-to-show', one);
+    win.webContents.once('did-finish-load', one);
+  });
   win.loadFile(UI('quick.html'));
-  win.once('ready-to-show', () => {
-    win.show();
-    win.focus();
-  });
-  quickCtx.set(win, { app: appInfo, shot, selection, parent, title: titleFor(question, selection), entryId: null, job: null, tween: null, asked: false });
-  win.webContents.once('did-finish-load', () => {
-    const cfg = store.currentProvider();
-    win.webContents.send('init', { question, selection, parent, autoAsk, app: appInfo, hasShot: !!shot, engine: engineLabel(cfg) });
-  });
+  return { win, ready };
+}
+const prepareSpare = () => {
+  if (!spare || spare.win.isDestroyed()) spare = createQuickWindow();
+};
+async function takeQuickWindow() {
+  if (!spare || spare.win.isDestroyed()) spare = createQuickWindow(); // not ready yet (first second after launch)
+  const s = spare;
+  spare = null;
+  await s.ready;
+  setTimeout(prepareSpare, 700); // next one, once this one is on screen
+  return s.win;
+}
+
+function placeFor(mode, offset) {
+  const pt = screen.getCursorScreenPoint();
+  const d = screen.getDisplayNearestPoint(pt).workArea;
+  if (mode === 'center') return { x: Math.round(d.x + (d.width - QUICK_W) / 2), y: Math.round(d.y + d.height * 0.2) };
+  return {
+    x: Math.min(Math.max(pt.x + 14 + offset, d.x), d.x + d.width - QUICK_W),
+    y: Math.min(Math.max(pt.y + 18 + offset, d.y), d.y + d.height - 180),
+  };
+}
+
+// Give the popup the keyboard. From another app Windows would leave the keyboard there (you'd have to click
+// the box first), so we ask it properly (see helper.ps1). From inside Magpie a plain focus() is enough.
+async function giveKeyboard(win, fromOtherApp) {
+  if (win.isDestroyed()) return;
+  if (fromOtherApp) await sysinfo.focusWindow(win.getNativeWindowHandle());
+  if (win.isDestroyed()) return;
+  win.focus();
+  win.webContents.focus();
+  win.webContents.send('focus-input');
+}
+
+// A screenshot that arrives after the popup opened: attach it to the question, or drop it if the popup is gone.
+function attachShot(win, file) {
+  if (!file) return;
+  const ctx = quickCtx.get(win);
+  if (!ctx) return fs.rmSync(path.join(store.shotsDir(), file), { force: true });
+  if (ctx.entryId) {
+    store.updateEntry(ctx.entryId, { shot: file });
+    notifyHistory();
+  } else ctx.shot = file;
+}
+
+// `late: true` (shortcut or Ask button, another app in front): the popup appears at once WITHOUT taking the
+// keyboard, because the other app must still have it while we read the selection. gatherAndOpen finishes the job.
+async function openQuick({ question = '', selection = '', app: appInfo = {}, shot = null, parent = null, mode = 'center', offset = 0, autoAsk = false, late = false, hold = null } = {}) {
+  const fromOtherApp = !BrowserWindow.getFocusedWindow();
+  const { x, y } = placeFor(mode, offset);
+  const win = await takeQuickWindow();
+  trace('popup window ready');
+  win.setBounds({ x, y, width: QUICK_W, height: 64 });
+  let finishGather = () => {};
+  const gathered = late ? new Promise((r) => (finishGather = r)) : Promise.resolve();
+  const ctx = { app: appInfo, shot, selection, parent, title: titleFor(question, selection), entryId: null, job: null, tween: null, asked: false, gathered, finishGather, fromOtherApp };
+  quickCtx.set(win, ctx);
   win.on('closed', () => {
     const c = quickCtx.get(win);
     c?.job?.cancel();
+    c?.finishGather?.();
     clearInterval(c?.tween);
     // a screenshot that never got attached to a logged question is just clutter
     if (c?.shot) fs.rmSync(path.join(store.shotsDir(), c.shot), { force: true });
     quickCtx.delete(win);
   });
+  const cfg = store.currentProvider();
+  win.webContents.send('init', { question, selection, parent, autoAsk, app: appInfo, hasShot: !!shot, engine: engineLabel(cfg) });
+  if (hold) {
+    // whole-screen screenshots must be taken before the popup covers anything
+    const f = await hold;
+    if (f) {
+      if (win.isDestroyed()) fs.rmSync(path.join(store.shotsDir(), f), { force: true });
+      else ctx.shot = f;
+    }
+  }
+  if (win.isDestroyed()) return win;
+  if (late) {
+    win.showInactive();
+    trace('popup: shown (your app keeps the keyboard while the selection is read)');
+  } else {
+    win.show();
+    await giveKeyboard(win, fromOtherApp);
+    trace('popup: shown and focused');
+  }
   return win;
 }
-const engineLabel = (cfg) => (cfg.model ? `${cfg.label} · ${cfg.model}` : cfg.label);
 
 // ---------------------------------------------------------------- hotkey / selection flows
 const held = new Set();
 async function waitModifiersReleased() {
-  for (let i = 0; i < 40 && held.size > 0; i++) await new Promise((r) => setTimeout(r, 25));
+  for (let i = 0; i < 100 && held.size > 0; i++) await new Promise((r) => setTimeout(r, 10));
   if (!hookRunning) await new Promise((r) => setTimeout(r, 350));
 }
 
 async function gatherAndOpen(mode) {
   const s = store.getSettings();
   engine.prewarm(store.currentProvider()); // start the slow part now; it finishes while you type
-  const ownFocused = !!BrowserWindow.getFocusedWindow();
-  await waitModifiersReleased();
-  const appInfo = ownFocused ? { process: '', title: '' } : await sysinfo.activeWindow();
+  if (BrowserWindow.getFocusedWindow()) {
+    // one of our own windows is in front: there is nothing outside to read
+    await openQuick({ mode });
+    return;
+  }
   const id = newId();
-  const wantShot = s.log.enabled && !ownFocused ? s.log.screenshot : 'off';
-  const [selection, shot] = await Promise.all([
-    ownFocused ? '' : sysinfo.captureSelection(appInfo),
-    sysinfo.screenshot(wantShot, appInfo.title, id),
-  ]);
-  openQuick({ selection, app: appInfo, shot, mode });
+  const wantShot = s.log.enabled ? s.log.screenshot : 'off';
+  const screenShot = wantShot === 'screen' ? sysinfo.screenshot('screen', '', id) : null; // runs alongside everything below
+  const opened = openQuick({ mode, late: true, hold: screenShot });
+  // Read the focused app and its selection while that app still has the keyboard.
+  const read = (async () => {
+    await waitModifiersReleased();
+    trace('keys released');
+    const app = await sysinfo.activeWindow();
+    trace('focused app identified');
+    const sel = await sysinfo.captureSelection(app);
+    trace('selection read');
+    return { app, sel };
+  })();
+  const [win, got] = await Promise.all([opened, read]);
+  const ctx = quickCtx.get(win);
+  if (!ctx || win.isDestroyed()) return; // closed before we finished: nothing left to do
+  ctx.app = got.app;
+  ctx.selection = got.sel;
+  ctx.title = titleFor('', got.sel);
+  if (got.sel) win.webContents.send('selection', { selection: got.sel, hasShot: wantShot !== 'off' });
+  ctx.finishGather();
+  // an active-window screenshot does not need to hold anything up
+  if (wantShot === 'window') sysinfo.screenshot('window', got.app.title, id).then((f) => attachShot(win, f));
+  await giveKeyboard(win, true);
+  trace('popup: keyboard focus handed over');
 }
 
 // Both the OS shortcut and the AltGr fallback end up here; never fire twice for one key press.
 function fireHotkey() {
   if (Date.now() - lastFire < 500) return;
   lastFire = Date.now();
+  T0 = Date.now();
+  trace('hotkey fired');
   toggleAsk();
 }
 
@@ -237,10 +335,14 @@ function startInputHooks() {
 }
 
 // ---------------------------------------------------------------- IPC: quick window
-ipcMain.on('quick:ask', (e, { question }) => {
+ipcMain.on('quick:ask', async (e, { question }) => {
   const win = BrowserWindow.fromWebContents(e.sender);
   const ctx = quickCtx.get(win);
   if (!ctx) return;
+  ctx.asked = true;
+  // asked before the selection was read (rare, it takes a fraction of a second): wait for it
+  await Promise.race([ctx.gathered, new Promise((r) => setTimeout(r, 3000))]);
+  if (!quickCtx.has(win) || e.sender.isDestroyed()) return;
   const s = store.getSettings();
   const cfg = store.currentProvider();
   ctx.job?.cancel();
@@ -317,8 +419,10 @@ ipcMain.on('quick:dig', (e, { term }) => {
 });
 ipcMain.on('app:openSettings', () => showMain('settings'));
 ipcMain.on('askbtn:click', async () => {
+  T0 = Date.now();
+  trace('Ask button clicked');
   hideAskButton();
-  await new Promise((r) => setTimeout(r, 60));
+  await new Promise((r) => setTimeout(r, 40));
   gatherAndOpen('cursor');
 });
 
@@ -471,6 +575,8 @@ if (!app.requestSingleInstanceLock()) {
     const r = registerHotkey(store.getSettings().hotkey);
     createAskButton();
     startInputHooks();
+    setTimeout(prepareSpare, 1500); // have the first popup loaded and waiting before the shortcut is first used
+    setTimeout(() => sysinfo.activeWindow(), 2500); // run the helper's first (slow, cold) command now, not on first use
     // Quiet once-a-day check. It only looks; installing always needs a click.
     setTimeout(() => {
       const s = store.getSettings();

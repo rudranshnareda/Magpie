@@ -59,6 +59,14 @@ async function activeWindow() {
   }
 }
 
+// Give a Magpie window real keyboard focus even though another app is in front (see helper.ps1).
+async function focusWindow(handleBuffer) {
+  try {
+    const h = handleBuffer.length >= 8 ? handleBuffer.readBigUInt64LE(0) : BigInt(handleBuffer.readUInt32LE(0));
+    await ask('focus ' + h.toString(), 1500);
+  } catch {}
+}
+
 // Copies whatever is selected in the focused app, then restores the clipboard.
 // Never sends Ctrl+C into a terminal (it would interrupt a running command).
 async function captureSelection(app) {
@@ -67,8 +75,13 @@ async function captureSelection(app) {
   const prev = clipboard.readText();
   clipboard.writeText('');
   await ask('copy');
-  await new Promise((r) => setTimeout(r, 120));
-  const sel = clipboard.readText().trim();
+  // Stop as soon as the text arrives (usually 10 to 40 ms) instead of always waiting a fixed 120 ms.
+  // With nothing selected the clipboard stays empty, so give up after about 140 ms.
+  let sel = '';
+  for (let i = 0; i < 14 && !sel; i++) {
+    await new Promise((r) => setTimeout(r, 10));
+    sel = clipboard.readText().trim();
+  }
   clipboard.writeText(prev);
   return sel;
 }
@@ -92,4 +105,4 @@ async function screenshot(mode, windowTitle, id) {
   }
 }
 
-module.exports = { startHelper, stopHelper, activeWindow, captureSelection, screenshot };
+module.exports = { startHelper, stopHelper, activeWindow, captureSelection, screenshot, focusWindow };

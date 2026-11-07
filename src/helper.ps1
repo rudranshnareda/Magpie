@@ -11,6 +11,11 @@ public class MagpieWin {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint p);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
 }
 "@
 $wsh = New-Object -ComObject WScript.Shell
@@ -30,6 +35,22 @@ while ($true) {
   }
   elseif ($line -eq 'copy') {
     $wsh.SendKeys('^c')
+    Out-Line 'ok'
+  }
+  elseif ($line -like 'focus *') {
+    # Windows refuses to let a background app take the keyboard. Briefly joining the focused window's input
+    # queue makes the request count as coming from the foreground, so the popup really receives typing.
+    $h = [IntPtr][long]($line.Substring(6))
+    $fg = [MagpieWin]::GetForegroundWindow()
+    $ignored = [uint32]0
+    $fgThread = [MagpieWin]::GetWindowThreadProcessId($fg, [ref]$ignored)
+    $me = [MagpieWin]::GetCurrentThreadId()
+    $attached = $false
+    if ($fgThread -ne 0 -and $fgThread -ne $me) { $attached = [MagpieWin]::AttachThreadInput($me, $fgThread, $true) }
+    [void][MagpieWin]::ShowWindow($h, 5)
+    [void][MagpieWin]::BringWindowToTop($h)
+    [void][MagpieWin]::SetForegroundWindow($h)
+    if ($attached) { [void][MagpieWin]::AttachThreadInput($me, $fgThread, $false) }
     Out-Line 'ok'
   }
   else { Out-Line 'unknown' }

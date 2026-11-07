@@ -8,9 +8,11 @@
   input, button, #out, .x, #chip { -webkit-app-region: no-drag; }
   .grip { height: 14px; display: flex; justify-content: center; align-items: flex-end; }
   .grip::after { content: ''; width: 34px; height: 4px; border-radius: 2px; background: var(--text-3); opacity: .55; margin-bottom: 1px; }
-  .bar { display: flex; align-items: center; gap: 12px; padding: 4px 20px 16px; }
-  .bar svg { flex: none; color: var(--text-2); }
-  #q { flex: 1; background: transparent; box-shadow: none !important; padding: 0; border-radius: 0; font: 400 22px/1.3 var(--font-display); letter-spacing: -.01em; color: var(--text); }
+  .bar { display: flex; align-items: flex-start; gap: 12px; padding: 4px 20px 16px; }
+  .bar svg { flex: none; color: var(--text-2); margin-top: 4px; }
+  .bar kbd { margin-top: 5px; flex: none; }
+  #q { flex: 1; display: block; min-width: 0; resize: none; overflow-y: auto; max-height: 172px; height: 29px; background: transparent; box-shadow: none !important; border: 0; padding: 0; border-radius: 0;
+    font: 400 22px/1.3 var(--font-display); letter-spacing: -.01em; color: var(--text); user-select: text; }
   #q::placeholder { color: var(--text-3); }
   #hint { transition: opacity .15s; }
   #chip { display: none; margin: 0 20px 16px; padding: 9px 12px; background: var(--fill); border-radius: 12px; font-size: 13px; color: var(--text-2); position: relative; padding-right: 32px; user-select: text; }
@@ -36,8 +38,8 @@
   <div class="grip"></div>
   <div class="bar">
     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20C4 10 10 4 20 4c0 10-6 16-16 16z"/><path d="M4 20l9-9"/></svg>
-    <input id="q" type="text" placeholder="Ask Magpie anything" autofocus autocomplete="off" spellcheck="false">
-    <kbd id="hint">Return</kbd>
+    <textarea id="q" rows="1" placeholder="Ask Magpie anything" autofocus autocomplete="off" spellcheck="false"></textarea>
+    <kbd id="hint" title="Shift + Return adds a new line">Return</kbd>
   </div>
   <div id="chip"><b>Selected text</b><span id="chiptxt"></span>
     <span class="x" id="x" title="Ignore the selection"><svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7"/></svg></span></div>
@@ -70,19 +72,25 @@ function ask(question) {
   $('hint').textContent = 'Return to ask again';
   magpie.send('quick:ask', { question });
 }
+// The popup appears the instant the shortcut is pressed. The selected text is read a moment later and
+// arrives separately ('selection'), so the box is usable immediately and the chip fills in when ready.
+const showSelection = (sel) => {
+  selection = sel || '';
+  if (!selection) return;
+  $('chip').style.display = 'block';
+  $('chiptxt').textContent = selection;
+  $('q').placeholder = 'Ask about this…';
+  $('hint').textContent = 'Return to explain';
+};
 magpie.on('init', ({ question, selection: sel, autoAsk, engine: eng }) => {
-  selection = sel || ''; engine = eng || '';
+  engine = eng || '';
   $('eng').textContent = engine;
-  if (selection) {
-    $('chip').style.display = 'block';
-    $('chiptxt').textContent = selection;
-    $('q').placeholder = 'Ask about this…';
-    $('hint').textContent = 'Return to explain';
-  }
-  if (question) $('q').value = question;
+  showSelection(sel);
+  if (question) { $('q').value = question; grow(); }
   if (autoAsk) ask(question);
   $('q').focus();
 });
+magpie.on('selection', ({ selection: sel }) => showSelection(sel));
 magpie.on('delta', (c) => { raw += c; draw(); });
 magpie.on('done', () => { busy = false; $('out').className = ''; draw(); $('save').disabled = !raw; $('copy').disabled = !raw; setMsg('Click a blue term to dig deeper'); });
 magpie.on('error', (m) => {
@@ -93,7 +101,14 @@ magpie.on('error', (m) => {
   if (needsSetup) { const b = document.createElement('button'); b.className = 'btn'; b.textContent = 'Open Settings'; b.onclick = () => magpie.send('app:openSettings'); $('out').firstChild.appendChild(document.createElement('br')); $('out').firstChild.appendChild(b); }
 });
 
-$('q').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); ask($('q').value); } });
+// The box grows with what you type (up to about six lines).
+const grow = () => { const q = $('q'); q.style.height = 'auto'; q.style.height = Math.min(q.scrollHeight, 172) + 'px'; };
+$('q').addEventListener('input', grow);
+// Return sends. Shift + Return adds a new line (the box's normal behaviour, so we only intercept plain Return).
+$('q').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); ask($('q').value); } });
+// The main process asks for focus once Windows has really handed the keyboard to this window.
+magpie.on('focus-input', () => { if (!asked) $('q').focus(); });
+addEventListener('focus', () => { if (!asked) $('q').focus(); });
 $('x').onclick = () => { selection = ''; $('chip').style.display = 'none'; $('q').placeholder = 'Ask Magpie anything'; $('hint').textContent = 'Return'; magpie.send('quick:clearSel'); $('q').focus(); };
 $('out').addEventListener('click', (e) => { const t = e.target.dataset && e.target.dataset.t; if (t) magpie.send('quick:dig', { term: t }); });
 $('save').onclick = async () => { const f = await magpie.invoke('quick:save', { body: raw }); setMsg(f ? 'Saved to your vault' : 'Could not save'); $('save').disabled = true; };

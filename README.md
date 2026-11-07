@@ -41,6 +41,7 @@ In the answer, terms the AI thinks you may not know are highlighted in blue. Cli
 | Key | Action |
 | --- | --- |
 | `Return` | Ask (or explain the selection) |
+| `Shift + Return` | New line, for a longer question |
 | `Esc` | Close the window |
 | Shortcut again | Close an unused prompt |
 | Click away | Closes a prompt you haven't asked yet. An answered window stays until you close it |
