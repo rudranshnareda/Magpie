@@ -1,0 +1,116 @@
+/* Magpie design system: quiet surfaces, hairlines, one accent, system fonts, light + dark. */
+:root {
+  color-scheme: light dark;
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --mono: "SF Mono", "Cascadia Code", ui-monospace, Consolas, monospace;
+  --accent: #007aff;
+  --accent-soft: rgba(0, 122, 255, .12);
+  --accent-soft-2: rgba(0, 122, 255, .2);
+  --green: #34c759;
+  --red: #ff3b30;
+  --text: rgba(0, 0, 0, .88);
+  --text-2: rgba(60, 60, 67, .62);
+  --text-3: rgba(60, 60, 67, .32);
+  --sep: rgba(60, 60, 67, .13);
+  --fill: rgba(120, 120, 128, .12);
+  --fill-2: rgba(120, 120, 128, .2);
+  --card: rgba(255, 255, 255, .62);
+  --glass: rgba(250, 250, 252, .6);
+  --sidebar: rgba(246, 246, 248, .5);
+  --hairline: rgba(255, 255, 255, .55);
+  --shadow: 0 1px 2px rgba(0, 0, 0, .06), 0 8px 24px rgba(0, 0, 0, .08);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --accent: #0a84ff;
+    --accent-soft: rgba(10, 132, 255, .18);
+    --accent-soft-2: rgba(10, 132, 255, .3);
+    --green: #30d158;
+    --red: #ff453a;
+    --text: rgba(255, 255, 255, .92);
+    --text-2: rgba(235, 235, 245, .62);
+    --text-3: rgba(235, 235, 245, .3);
+    --sep: rgba(84, 84, 88, .55);
+    --fill: rgba(120, 120, 128, .24);
+    --fill-2: rgba(120, 120, 128, .36);
+    --card: rgba(44, 44, 48, .55);
+    --glass: rgba(30, 30, 33, .58);
+    --sidebar: rgba(28, 28, 30, .4);
+    --hairline: rgba(255, 255, 255, .09);
+    --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px rgba(0, 0, 0, .3);
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: transparent; color: var(--text); font: 14px/1.5 var(--font);
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+}
+::selection { background: var(--accent-soft-2); }
+::-webkit-scrollbar { width: 12px; height: 12px; }
+::-webkit-scrollbar-thumb { background: var(--fill-2); border-radius: 6px; border: 3px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-3); background-clip: content-box; border: 3px solid transparent; }
+::-webkit-scrollbar-corner, ::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------- controls ---------- */
+.btn {
+  font: inherit; font-size: 13px; font-weight: 500; height: 30px; padding: 0 14px; border-radius: 15px; border: 0;
+  background: var(--fill); color: var(--text); cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+  transition: background .12s, transform .08s, filter .12s; white-space: nowrap;
+}
+.btn:hover { background: var(--fill-2); }
+.btn:active { transform: scale(.97); }
+.btn.primary { background: var(--accent); color: #fff; }
+.btn.primary:hover { filter: brightness(1.08); background: var(--accent); }
+.btn.danger { color: var(--red); }
+.btn.ghost { background: transparent; }
+.btn.ghost:hover { background: var(--fill); }
+.btn:disabled, .btn.disabled { opacity: .4; pointer-events: none; }
+.btn svg { flex: none; }
+kbd {
+  font: 500 11px var(--font); color: var(--text-2); background: var(--fill); border-radius: 5px; padding: 1px 6px;
+  border: 0; box-shadow: inset 0 -1px 0 var(--sep);
+}
+input[type=text], input[type=password], input[type=search], select {
+  font: inherit; font-size: 13px; color: var(--text); background: var(--fill); border: 0; border-radius: 14px;
+  padding: 8px 14px; outline: none; min-width: 0; transition: box-shadow .12s;
+}
+input:focus, select:focus { box-shadow: 0 0 0 3px var(--accent-soft-2); }
+input::placeholder { color: var(--text-3); }
+select { padding-right: 30px; appearance: none; cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238e8e93' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 9px center; }
+option, optgroup { background: Canvas; color: CanvasText; }
+
+.switch { position: relative; width: 42px; height: 26px; flex: none; }
+.switch input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; z-index: 1; }
+.switch i { position: absolute; inset: 0; background: var(--fill-2); border-radius: 13px; transition: background .2s; }
+.switch i::after {
+  content: ''; position: absolute; left: 2px; top: 2px; width: 22px; height: 22px; border-radius: 50%; background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .3); transition: transform .2s cubic-bezier(.3, .9, .3, 1);
+}
+.switch input:checked + i { background: var(--green); }
+.switch input:checked + i::after { transform: translateX(16px); }
+
+.seg { display: inline-flex; background: var(--fill); border-radius: 9px; padding: 2px; gap: 2px; }
+.seg button {
+  font: inherit; font-size: 12.5px; font-weight: 500; border: 0; background: transparent; color: var(--text-2);
+  padding: 4px 12px; border-radius: 7px; cursor: pointer; transition: .15s;
+}
+.seg button.on { background: var(--card); color: var(--text); box-shadow: 0 1px 3px rgba(0, 0, 0, .18), inset 0 0 0 .5px var(--hairline); }
+
+/* ---------- prose (answers) ---------- */
+.prose { font-size: 15px; line-height: 1.62; }
+.prose p { margin: 0 0 .75em; }
+.prose p:last-child, .prose ul:last-child { margin-bottom: 0; }
+.prose ul { margin: 0 0 .75em; padding-left: 1.25em; }
+.prose li { margin: .2em 0; }
+.prose strong { font-weight: 600; }
+.prose code { font: 13px var(--mono); background: var(--fill); padding: 1px 5px; border-radius: 5px; }
+.dig {
+  color: var(--accent); background: var(--accent-soft); padding: 0 6px; border-radius: 6px; cursor: pointer;
+  transition: background .12s; white-space: nowrap;
+}
+.dig:hover { background: var(--accent-soft-2); }

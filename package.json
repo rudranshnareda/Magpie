@@ -1,0 +1,51 @@
+{
+  "name": "magpie",
+  "version": "0.3.4",
+  "description": "Select text anywhere, ask Magpie, get a floating answer. Keeps a searchable log and a linked notes vault.",
+  "main": "src/main.js",
+  "author": "rudranshnareda",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "icon": "node scripts/make-icon.js",
+    "dist": "electron-builder --win nsis"
+  },
+  "dependencies": {
+    "uiohook-napi": "^1.5.4"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.magpie.app",
+    "productName": "Magpie",
+    "npmRebuild": false,
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "src/helper.ps1"
+    ],
+    "win": {
+      "icon": "assets/icon.png",
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rudranshnareda/Magpie.git"
+  },
+  "homepage": "https://github.com/rudranshnareda/Magpie#readme",
+  "bugs": {
+    "url": "https://github.com/rudranshnareda/Magpie/issues"
+  }
+}

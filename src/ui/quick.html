@@ -1,0 +1,110 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Magpie</title>
+<link rel="stylesheet" href="theme.css">
+<style>
+  html, body { overflow: hidden; user-select: none; }
+  #app { display: flow-root; position: relative; background: var(--glass); box-shadow: inset 0 0 0 1px var(--hairline); -webkit-app-region: drag; animation: pop .2s cubic-bezier(.2,.8,.2,1); }
+  @keyframes pop { from { opacity: 0; transform: translateY(-6px) scale(.985); } to { opacity: 1; transform: none; } }
+  input, button, #out, .x, #chip { -webkit-app-region: no-drag; }
+  .grip { height: 14px; display: flex; justify-content: center; align-items: flex-end; }
+  .grip::after { content: ''; width: 34px; height: 4px; border-radius: 2px; background: var(--text-3); opacity: .55; margin-bottom: 1px; }
+  .bar { display: flex; align-items: center; gap: 12px; padding: 4px 20px 16px; }
+  .bar svg { flex: none; color: var(--text-2); }
+  #q { flex: 1; background: transparent; box-shadow: none !important; padding: 0; border-radius: 0; font: 400 22px/1.3 var(--font-display); letter-spacing: -.01em; color: var(--text); }
+  #q::placeholder { color: var(--text-3); }
+  #hint { transition: opacity .15s; }
+  #chip { display: none; margin: 0 20px 16px; padding: 9px 12px; background: var(--fill); border-radius: 12px; font-size: 13px; color: var(--text-2); position: relative; padding-right: 32px; user-select: text; }
+  #chip b { display: block; font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--text-3); margin-bottom: 2px; }
+  #chip .x { position: absolute; right: 8px; top: 8px; width: 20px; height: 20px; border-radius: 10px; display: grid; place-items: center; cursor: pointer; color: var(--text-2); }
+  #chip .x:hover { background: var(--fill-2); color: var(--text); }
+  #chiptxt { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  #ans { display: none; border-top: 1px solid var(--sep); }
+  #out { max-height: 360px; overflow: auto; padding: 16px 22px 14px; user-select: text; }
+  #out.busy .prose > :last-child::after { content: ''; display: inline-block; width: 7px; height: 15px; background: var(--accent); border-radius: 2px; margin-left: 3px; vertical-align: -2px; animation: blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .sk { height: 11px; border-radius: 6px; margin: 9px 0; background: linear-gradient(90deg, var(--fill) 25%, var(--fill-2) 37%, var(--fill) 63%); background-size: 300% 100%; animation: sh 1.3s linear infinite; }
+  @keyframes sh { from { background-position: 100% 0; } to { background-position: 0 0; } }
+  .err { color: var(--red); font-size: 13.5px; }
+  .err .btn { margin-top: 10px; }
+  .foot { display: flex; align-items: center; gap: 8px; padding: 8px 14px 12px 22px; }
+  #eng { font-size: 12px; color: var(--text-3); margin-right: auto; display: flex; align-items: center; gap: 6px; }
+  #eng::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--green); opacity: .9; }
+  #msg { font-size: 12px; color: var(--text-2); }
+</style></head>
+<body>
+<div id="app">
+  <div class="grip"></div>
+  <div class="bar">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20C4 10 10 4 20 4c0 10-6 16-16 16z"/><path d="M4 20l9-9"/></svg>
+    <input id="q" type="text" placeholder="Ask Magpie anything" autofocus autocomplete="off" spellcheck="false">
+    <kbd id="hint">Return</kbd>
+  </div>
+  <div id="chip"><b>Selected text</b><span id="chiptxt"></span>
+    <span class="x" id="x" title="Ignore the selection"><svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7"/></svg></span></div>
+  <div id="ans">
+    <div id="out"></div>
+    <div class="foot">
+      <span id="eng"></span><span id="msg"></span>
+      <button class="btn ghost" id="copy" disabled>Copy</button>
+      <button class="btn primary" id="save" disabled>Save</button>
+      <button class="btn" id="dismiss">Close <kbd>Esc</kbd></button>
+    </div>
+  </div>
+</div>
+<script src="md.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+let raw = '', asked = false, selection = '', busy = false, engine = '';
+const setMsg = (t) => ($('msg').textContent = t || '');
+const draw = () => { $('out').innerHTML = '<div class="prose">' + renderMd(raw) + '</div>'; $('out').scrollTop = $('out').scrollHeight; };
+
+function ask(question) {
+  if (busy) return;
+  question = question.trim();
+  if (!question && !selection) return;
+  asked = true; busy = true; raw = '';
+  $('ans').style.display = 'block';
+  $('out').className = 'busy';
+  $('out').innerHTML = '<div class="sk" style="width:92%"></div><div class="sk" style="width:78%"></div><div class="sk" style="width:55%"></div>';
+  $('save').disabled = true; $('copy').disabled = true; setMsg('');
+  $('hint').textContent = 'Return to ask again';
+  magpie.send('quick:ask', { question });
+}
+magpie.on('init', ({ question, selection: sel, autoAsk, engine: eng }) => {
+  selection = sel || ''; engine = eng || '';
+  $('eng').textContent = engine;
+  if (selection) {
+    $('chip').style.display = 'block';
+    $('chiptxt').textContent = selection;
+    $('q').placeholder = 'Ask about this…';
+    $('hint').textContent = 'Return to explain';
+  }
+  if (question) $('q').value = question;
+  if (autoAsk) ask(question);
+  $('q').focus();
+});
+magpie.on('delta', (c) => { raw += c; draw(); });
+magpie.on('done', () => { busy = false; $('out').className = ''; draw(); $('save').disabled = !raw; $('copy').disabled = !raw; setMsg('Click a blue term to dig deeper'); });
+magpie.on('error', (m) => {
+  busy = false; $('out').className = '';
+  const needsSetup = /Settings|Could not start|not recognized|API key|model/i.test(m);
+  $('out').innerHTML = '<div class="err"></div>';
+  $('out').firstChild.textContent = m;
+  if (needsSetup) { const b = document.createElement('button'); b.className = 'btn'; b.textContent = 'Open Settings'; b.onclick = () => magpie.send('app:openSettings'); $('out').firstChild.appendChild(document.createElement('br')); $('out').firstChild.appendChild(b); }
+});
+
+$('q').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); ask($('q').value); } });
+$('x').onclick = () => { selection = ''; $('chip').style.display = 'none'; $('q').placeholder = 'Ask Magpie anything'; $('hint').textContent = 'Return'; magpie.send('quick:clearSel'); $('q').focus(); };
+$('out').addEventListener('click', (e) => { const t = e.target.dataset && e.target.dataset.t; if (t) magpie.send('quick:dig', { term: t }); });
+$('save').onclick = async () => { const f = await magpie.invoke('quick:save', { body: raw }); setMsg(f ? 'Saved to your vault' : 'Could not save'); $('save').disabled = true; };
+$('copy').onclick = async () => { try { await navigator.clipboard.writeText(raw.replace(/\[\[([^\]]+)\]\]/g, '$1')); setMsg('Copied'); } catch { setMsg('Could not copy'); } };
+$('dismiss').onclick = () => magpie.send('quick:dismiss');
+addEventListener('keydown', (e) => { if (e.key === 'Escape') magpie.send('quick:dismiss'); });
+// Spotlight-style: clicking away from a prompt you haven't asked yet dismisses it, typed text or not.
+// Once you've asked, the answer stays until you close it.
+addEventListener('blur', () => setTimeout(() => { if (!asked && !document.hasFocus()) magpie.send('quick:dismiss'); }, 200));
+// Keep the window exactly as tall as its content (measured with sub-pixel precision, margins included).
+const fit = () => magpie.send('quick:resize', Math.ceil($('app').getBoundingClientRect().height));
+new ResizeObserver(fit).observe($('app'));
+addEventListener('load', fit);
+</script></body></html>
