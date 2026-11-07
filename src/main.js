@@ -9,6 +9,7 @@ const providers = require('./providers');
 const store = require('./store');
 const vault = require('./vault');
 const sysinfo = require('./sysinfo');
+const updater = require('./updater');
 
 const ICON = path.join(__dirname, '..', 'assets', 'icon.png');
 const PRELOAD = path.join(__dirname, 'preload.js');
@@ -373,6 +374,46 @@ ipcMain.handle('provider:setKey', (_, { id, key }) => {
 ipcMain.handle('provider:test', (_, id) => engine.test(store.currentProvider(id)));
 ipcMain.handle('provider:models', (_, id) => engine.listOllama(store.currentProvider(id).baseUrl));
 
+// ---------------------------------------------------------------- updates
+function announceUpdate() {
+  const s = updater.state();
+  tray?.setToolTip(s.available ? `Magpie: version ${s.latest} is available` : `Magpie (${currentHotkey ? currentHotkey.replace('Control', 'Ctrl') : ''})`);
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('update:changed');
+}
+async function runUpdateCheck() {
+  try {
+    await updater.check();
+    store.setSettings({ lastUpdateCheck: Date.now() });
+    announceUpdate();
+    return { ok: true, ...updater.state() };
+  } catch (err) {
+    return { ok: false, error: err.message, ...updater.state() };
+  }
+}
+ipcMain.handle('update:check', () => runUpdateCheck());
+ipcMain.handle('update:state', () => updater.state());
+ipcMain.handle('update:download', async (e) => {
+  try {
+    await updater.download((got, total) => !e.sender.isDestroyed() && e.sender.send('update:progress', { got, total }));
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+ipcMain.handle('update:install', async () => {
+  try {
+    const r = await updater.install();
+    if (!r.dryRun) setTimeout(() => app.quit(), 400); // the installer replaces our files, so we must not be running
+    return { ok: true, dryRun: r.dryRun };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+ipcMain.on('update:notes', () => {
+  const u = updater.state().url || '';
+  if (u.startsWith(`https://github.com/${updater.REPO}/`)) shell.openExternal(u);
+});
+
 ipcMain.handle('app:status', () =>
   new Promise((resolve) => {
     execFile('claude', ['--version'], { windowsHide: true, timeout: 8000 }, (err, out) =>
@@ -405,6 +446,11 @@ if (!app.requestSingleInstanceLock()) {
     const r = registerHotkey(store.getSettings().hotkey);
     createAskButton();
     startInputHooks();
+    // Quiet once-a-day check. It only looks; installing always needs a click.
+    setTimeout(() => {
+      const s = store.getSettings();
+      if (s.autoUpdateCheck !== false && Date.now() - (s.lastUpdateCheck || 0) > 20 * 3600 * 1000) runUpdateCheck();
+    }, 12000);
     if (!startHidden || !r.ok) showMain(r.ok ? undefined : 'settings');
   });
   app.on('window-all-closed', () => {}); // keep running in the tray

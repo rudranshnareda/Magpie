@@ -20,6 +20,14 @@ You ask an AI something. It writes a big answer full of words you don't know. If
 
 The installer is not code-signed, so Windows SmartScreen may say "Windows protected your PC". Choose **More info**, then **Run anyway**. You can verify the download against the SHA-256 listed in the release notes.
 
+## Updating
+
+Open **Settings → General → Check for updates**. If a newer release exists, press **Update now**. Magpie downloads the installer, verifies its SHA-256 checksum against the one published with the release, then installs it and reopens itself. Your history, settings and notes are kept.
+
+Once a day Magpie also checks quietly in the background and shows an **Update available** button in the sidebar. It never installs anything without your click, and you can turn the daily check off in the same Settings section.
+
+Versions before 0.3.6 don't have this button. Install 0.3.6 once by hand, and later updates are one click.
+
 ## Using it
 
 There are two ways to ask.
@@ -96,6 +104,7 @@ If you try one of the untested providers, please open an issue and say whether i
 - Screenshots are never sent anywhere.
 - To answer, Magpie sends your chosen AI engine your question, the selected text, and only the app name and window title you have switched on. Nothing else.
 - There is no Magpie server, account, analytics or telemetry.
+- The only other network request is the optional once-a-day update check, which reads this repository's public release information from GitHub. It sends nothing about you. Turn it off in Settings.
 
 ## How it works
 
@@ -130,6 +139,7 @@ src/main.js        windows, shortcut, selection button, IPC
 src/engine.js      talks to the chosen AI backend
 src/providers.js   the list of supported providers
 src/store.js       settings, history, encrypted keys
+src/updater.js     checks GitHub releases, downloads and verifies updates
 src/sysinfo.js     focused app, selection capture, screenshots
 src/vault.js       saves linked markdown notes
 src/ui/            the popup, the app window, the shared theme

@@ -10,6 +10,8 @@ const DEFAULTS = {
   showAskButton: true,
   vaultPath: path.join(os.homedir(), 'Magpie-Vault'),
   openAtLogin: false,
+  autoUpdateCheck: true, // once a day, ask GitHub whether a newer release exists (never installs by itself)
+  lastUpdateCheck: 0,
   provider: 'claude-cli',
   providers: {}, // id -> { model, baseUrl, command }
   secrets: {}, // id -> encrypted API key (never sent to the UI)

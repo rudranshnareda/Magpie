@@ -68,6 +68,10 @@
   #lb { position: fixed; inset: 0; background: rgba(0,0,0,.72); backdrop-filter: blur(12px); display: none; align-items: center; justify-content: center; z-index: 20; }
   #lb img { max-width: 92vw; max-height: 92vh; border-radius: 12px; box-shadow: 0 20px 60px rgba(0,0,0,.5); }
   .seg button { -webkit-app-region: no-drag; }
+  .bar { height: 6px; border-radius: 3px; background: var(--fill); overflow: hidden; margin-top: 9px; max-width: 320px; display: none; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 3px; transition: width .25s; }
+  .pill { background: var(--accent-soft) !important; color: var(--accent) !important; font-weight: 600; }
+  .pill:hover { background: var(--accent-soft-2) !important; }
 </style></head>
 <body>
 <aside class="side">
@@ -78,6 +82,7 @@
   </nav>
   <div class="sp"></div>
   <div class="foot">
+    <button class="btn pill" id="upd-pill" style="display:none"></button>
     <button class="btn primary" id="newq"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>New question</button>
     <span id="hkhint"></span>
   </div>
@@ -125,6 +130,9 @@
   </div></div>
 
   <div class="group"><h3>General</h3><div class="list">
+    <div class="row" id="r-update"><div class="l"><b id="upd-title">Magpie</b><small id="upd-sub"></small><div class="bar" id="upd-bar"><i></i></div></div>
+      <button class="btn ghost" id="upd-notes" style="display:none">What's new</button><button class="btn" id="upd-btn">Check for updates</button></div>
+    <div class="row"><div class="l"><b>Check automatically</b><small>Once a day Magpie asks GitHub if a newer version exists. It never installs anything without your click.</small></div><label class="switch"><input type="checkbox" id="autoUpdateCheck"><i></i></label></div>
     <div class="row"><div class="l"><b>Start with Windows</b><small id="loginNote">Runs quietly in the tray.</small></div><label class="switch"><input type="checkbox" id="openAtLogin"><i></i></label></div>
     <div class="row"><div class="l"><b>Selection button</b><small id="st-hook">Checking…</small></div></div>
     <div class="row"><div class="l"><b>Data folder</b><small id="st-dir"></small></div></div>
@@ -315,9 +323,57 @@ async function loadStatus() {
   if (reg?.id === 'claude-cli') $('prov-hint').innerHTML = esc(reg.hint) + (status.claude ? ` <span class="ok">Found ${esc(status.claude)}.</span>` : ' <span class="bad">Claude Code was not found. Install it and run “claude” once to sign in.</span>');
 }
 
+/* ---------- updates ---------- */
+// phase: idle | checking | uptodate | available | downloading | installing | error | testdone
+let upd = { phase: 'idle', info: { current: '' }, pct: 0, error: '' };
+const mb = (n) => (n ? (n / 1048576).toFixed(0) + ' MB' : '');
+function updRender() {
+  const i = upd.info, p = upd.phase, btn = $('upd-btn'), sub = $('upd-sub');
+  $('upd-title').textContent = 'Magpie ' + (i.current || '');
+  sub.className = '';
+  $('upd-bar').style.display = p === 'downloading' ? 'block' : 'none';
+  $('upd-bar').firstElementChild.style.width = upd.pct + '%';
+  $('upd-notes').style.display = p === 'available' ? '' : 'none';
+  btn.disabled = false; btn.className = 'btn';
+  const sidebar = $('upd-pill'); sidebar.style.display = (p === 'available' || p === 'downloading') ? '' : 'none';
+  sidebar.textContent = i.latest ? `Update ${i.latest} available` : '';
+  if (p === 'idle') { sub.textContent = 'See if a newer version is available.'; btn.textContent = 'Check for updates'; }
+  if (p === 'checking') { sub.textContent = 'Checking…'; btn.textContent = 'Checking…'; btn.disabled = true; }
+  if (p === 'uptodate') { sub.textContent = 'You have the latest version.'; sub.className = 'ok'; btn.textContent = 'Check again'; }
+  if (p === 'available') { sub.textContent = `Version ${i.latest} is available${i.size ? ' (' + mb(i.size) + ')' : ''}.`; btn.textContent = 'Update now'; btn.className = 'btn primary'; }
+  if (p === 'downloading') { sub.textContent = `Downloading… ${upd.pct}%`; btn.textContent = 'Downloading…'; btn.disabled = true; }
+  if (p === 'installing') { sub.textContent = 'Installing. Magpie will close and reopen by itself.'; btn.textContent = 'Installing…'; btn.disabled = true; }
+  if (p === 'testdone') { sub.textContent = 'Downloaded and verified. (Test mode: not installing.)'; sub.className = 'ok'; btn.textContent = 'Done'; btn.disabled = true; }
+  if (p === 'error') { sub.textContent = upd.error; sub.className = 'bad'; btn.textContent = 'Try again'; }
+}
+async function updCheck() {
+  upd.phase = 'checking'; updRender();
+  const r = await magpie.invoke('update:check');
+  upd.info = r;
+  if (!r.ok) { upd.phase = 'error'; upd.error = r.error; }
+  else upd.phase = r.available ? 'available' : 'uptodate';
+  updRender();
+}
+async function updInstall() {
+  upd.phase = 'downloading'; upd.pct = 0; updRender();
+  const d = await magpie.invoke('update:download');
+  if (!d.ok) { upd.phase = 'error'; upd.error = d.error; return updRender(); }
+  upd.phase = 'installing'; updRender();
+  const r = await magpie.invoke('update:install');
+  if (!r.ok) { upd.phase = 'error'; upd.error = r.error; }
+  else if (r.dryRun) upd.phase = 'testdone';
+  updRender();
+}
+$('upd-btn').onclick = () => (upd.phase === 'available' ? updInstall() : updCheck());
+$('upd-notes').onclick = () => magpie.send('update:notes');
+$('upd-pill').onclick = () => { tab('set'); $('r-update').scrollIntoView({ block: 'center', behavior: 'smooth' }); };
+magpie.on('update:progress', ({ got, total }) => { upd.pct = total ? Math.min(100, Math.round((got / total) * 100)) : 0; if (upd.phase === 'downloading') updRender(); });
+magpie.on('update:changed', async () => { const s = await magpie.invoke('update:state'); upd.info = s; if (upd.phase === 'idle' || upd.phase === 'uptodate') upd.phase = s.available ? 'available' : upd.phase; updRender(); });
+async function updInit() { const s = await magpie.invoke('update:state'); upd.info = s; if (s.available) upd.phase = 'available'; updRender(); }
+
 (async function init() {
   settings = await magpie.invoke('settings:get');
   registry = await magpie.invoke('provider:registry');
-  fill(); buildProviderSelect(); renderEngine(); load();
+  fill(); buildProviderSelect(); renderEngine(); load(); updInit();
 })();
 </script></body></html>
