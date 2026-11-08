@@ -1,6 +1,6 @@
 {
   "name": "magpie",
-  "version": "0.3.11",
+  "version": "0.3.12",
   "description": "Select text anywhere, ask Magpie, get a floating answer. Keeps a searchable log and a linked notes vault.",
   "main": "src/main.js",
   "author": "rudranshnareda",

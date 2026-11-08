@@ -10,13 +10,20 @@ You MUST wrap 2-4 technical terms the reader may not know in [[double brackets]]
 (e.g. "uses [[photolithography]] to etch the chip"), every time, so they become clickable.
 Use the already-known terms and the parent trail (if given) to avoid re-explaining and to stay in context.`;
 
-function buildPrompt({ question = '', selection = '', trail = [], known = [], app = null }) {
+function buildPrompt({ question = '', selection = '', trail = [], known = [], app = null, from = null }) {
   let p = '';
-  if (app && (app.process || app.title)) p += `The reader is currently in: ${[app.process, app.title].filter(Boolean).join(' - ')}\n`;
+  if (app && (app.process || app.title)) p += `The reader is currently in (background only, not the topic): ${[app.process, app.title].filter(Boolean).join(' - ')}\n`;
   if (trail.length) p += `Parent trail (what the reader came from): ${trail.join(' > ')}\n`;
   if (known.length) p += `Terms the reader already knows (do not explain): ${known.slice(-200).join(', ')}\n`;
   p += '\n';
-  if (selection && question) p += `The reader selected this passage:\n"""\n${selection}\n"""\nTheir question about it: ${question}`;
+  if (from && (from.answer || from.question)) {
+    // a term clicked inside an earlier answer: explain it as used there
+    p += `The reader was reading an explanation`;
+    if (from.question || from.selection) p += ` of "${String(from.question || from.selection).slice(0, 300)}"`;
+    if (from.answer) p += `:\n"""\n${String(from.answer).slice(0, 3000)}\n"""\n`;
+    else p += '.\n';
+    p += `They clicked the term "${question}" in it. Explain what "${question}" means in that context.`;
+  } else if (selection && question) p += `The reader selected this passage:\n"""\n${selection}\n"""\nTheir question about it: ${question}`;
   else if (selection) p += `Explain this passage the reader selected:\n"""\n${selection}\n"""`;
   else p += question;
   return p;
@@ -335,4 +342,4 @@ function shutdown() {
   for (const [m, e] of [...spares]) dropSpare(m, e);
 }
 
-module.exports = { explain, prewarm, test, listModels, shutdown, SYSTEM };
+module.exports = { explain, prewarm, test, listModels, shutdown, SYSTEM, buildPrompt };

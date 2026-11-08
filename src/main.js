@@ -103,13 +103,16 @@ async function takeQuickWindow() {
   return s.win;
 }
 
+// Positions are kept on multiples of 4: at 125% / 150% display scaling those land on whole screen pixels, so
+// Windows doesn't round them (rounding is what let the popup creep up-left and widen).
+const snap4 = (v) => Math.round(v / 4) * 4;
 function placeFor(mode, offset) {
   const pt = screen.getCursorScreenPoint();
   const d = screen.getDisplayNearestPoint(pt).workArea;
-  if (mode === 'center') return { x: Math.round(d.x + (d.width - QUICK_W) / 2), y: Math.round(d.y + d.height * 0.2) };
+  if (mode === 'center') return { x: snap4(d.x + (d.width - QUICK_W) / 2), y: snap4(d.y + d.height * 0.2) };
   return {
-    x: Math.min(Math.max(pt.x + 14 + offset, d.x), d.x + d.width - QUICK_W),
-    y: Math.min(Math.max(pt.y + 18 + offset, d.y), d.y + d.height - 180),
+    x: snap4(Math.min(Math.max(pt.x + 14 + offset, d.x), d.x + d.width - QUICK_W)),
+    y: snap4(Math.min(Math.max(pt.y + 18 + offset, d.y), d.y + d.height - 180)),
   };
 }
 
@@ -137,7 +140,7 @@ function attachShot(win, file) {
 
 // `late: true` (shortcut or Ask button, another app in front): the popup appears at once WITHOUT taking the
 // keyboard, because the other app must still have it while we read the selection. gatherAndOpen finishes the job.
-async function openQuick({ question = '', selection = '', app: appInfo = {}, shot = null, parent = null, mode = 'center', offset = 0, autoAsk = false, late = false, hold = null } = {}) {
+async function openQuick({ question = '', selection = '', app: appInfo = {}, shot = null, parent = null, from = null, mode = 'center', offset = 0, autoAsk = false, late = false, hold = null } = {}) {
   const fromOtherApp = !BrowserWindow.getFocusedWindow();
   const { x, y } = placeFor(mode, offset);
   const win = await takeQuickWindow();
@@ -145,8 +148,11 @@ async function openQuick({ question = '', selection = '', app: appInfo = {}, sho
   win.setBounds({ x, y, width: QUICK_W, height: 64 });
   let finishGather = () => {};
   const gathered = late ? new Promise((r) => (finishGather = r)) : Promise.resolve();
-  const ctx = { app: appInfo, shot, selection, parent, title: titleFor(question, selection), entryId: null, job: null, tween: null, asked: false, gathered, finishGather, fromOtherApp };
+  const ctx = { app: appInfo, shot, selection, parent, from, title: titleFor(question, selection), entryId: null, job: null, tween: null, asked: false, gathered, finishGather, fromOtherApp, pos: { x, y }, answer: '', question };
   quickCtx.set(win, ctx);
+  // Where the popup should be. Only the user dragging it changes this; it is never read back from the window,
+  // because at fractional display scaling every read-back is off by a pixel and the errors add up.
+  win.on('will-move', (_, nb) => (ctx.pos = { x: nb.x, y: nb.y }));
   win.on('closed', () => {
     const c = quickCtx.get(win);
     c?.job?.cancel();
@@ -454,12 +460,15 @@ ipcMain.on('quick:ask', async (e, { question }) => {
   ctx.job?.cancel();
   ctx.asked = true;
   ctx.title = titleFor(question, ctx.selection);
+  ctx.question = question;
   const sender = e.sender;
   const job = engine.explain(
     {
       question, selection: ctx.selection, trail: vault.trail(ctx.parent), known: vault.known(),
+      // a clicked term: the answer it came from is the context, not the app you happen to be in
+      from: ctx.from && question === ctx.from.term ? ctx.from : null,
       // only share what the user has switched on in Settings
-      app: { process: s.log.appName ? ctx.app.process : '', title: s.log.windowTitle ? ctx.app.title : '' },
+      app: ctx.from ? {} : { process: s.log.appName ? ctx.app.process : '', title: s.log.windowTitle ? ctx.app.title : '' },
     },
     (c) => !sender.isDestroyed() && sender.send('delta', c),
     cfg
@@ -468,6 +477,7 @@ ipcMain.on('quick:ask', async (e, { question }) => {
   job.promise
     .then((answer) => {
       if (answer === null || sender.isDestroyed()) return;
+      ctx.answer = answer;
       if (s.log.enabled) {
         const entry = store.addEntry({
           id: newId(), ts: Date.now(), question, selection: s.log.selectedText ? ctx.selection : '',
@@ -509,8 +519,8 @@ ipcMain.on('quick:resize', (e, target) => {
     const p = Math.min(1, (Date.now() - t0) / dur);
     const eased = 1 - Math.pow(1 - p, 3);
     const h = Math.round(from + (to - from) * eased);
-    const b = win.getBounds();
-    win.setBounds({ x: b.x, y: Math.min(b.y, d.y + d.height - h - 8), width: b.width, height: h });
+    // position and width come from ctx, never from getBounds() (see openQuick)
+    win.setBounds({ x: ctx.pos.x, y: Math.max(d.y, Math.min(ctx.pos.y, d.y + d.height - h - 8)), width: QUICK_W, height: h });
     if (p >= 1) clearInterval(ctx.tween);
   }, 12);
 });
@@ -521,7 +531,8 @@ ipcMain.on('quick:clearSel', (e) => {
 });
 ipcMain.on('quick:dig', (e, { term }) => {
   const ctx = quickCtx.get(BrowserWindow.fromWebContents(e.sender));
-  openQuick({ question: term, parent: ctx?.title || null, app: ctx?.app || {}, mode: 'cursor', offset: 28, autoAsk: true });
+  const from = ctx ? { term, question: ctx.question || ctx.title, selection: ctx.selection, answer: ctx.answer } : null;
+  openQuick({ question: term, parent: ctx?.title || null, from, app: ctx?.app || {}, mode: 'cursor', offset: 28, autoAsk: true });
 });
 ipcMain.on('app:openSettings', () => showMain('settings'));
 ipcMain.on('askbtn:click', async () => {
@@ -552,7 +563,8 @@ ipcMain.handle('history:save', (_, id) => {
 });
 ipcMain.on('history:dig', (_, { term, id }) => {
   const e = store.getHistory().find((x) => x.id === id);
-  openQuick({ question: term, parent: e ? titleFor(e.question, e.selection) : null, mode: 'center', autoAsk: true });
+  const from = e ? { term, question: e.question, selection: e.selection, answer: e.answer } : null;
+  openQuick({ question: term, parent: e ? titleFor(e.question, e.selection) : null, from, mode: 'center', autoAsk: true });
 });
 ipcMain.on('history:ask', () => gatherAndOpen('center'));
 ipcMain.on('shell:reveal', (_, file) => file && shell.showItemInFolder(file));
