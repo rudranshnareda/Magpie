@@ -4,6 +4,11 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const store = require('./store');
+const win32 = require('./win32');
+
+// Native calls are the normal path; the PowerShell helper is only a fallback. MAGPIE_TEST_NO_NATIVE forces the
+// fallback (tests only).
+const native = win32.available && !process.env.MAGPIE_TEST_NO_NATIVE;
 
 const TERMINALS = new Set(['windowsterminal', 'powershell', 'pwsh', 'cmd', 'conhost', 'wezterm-gui', 'alacritty', 'mintty', 'bash', 'wsl', 'wslhost']);
 
@@ -53,18 +58,25 @@ function stopHelper() {
 // ---- public API -------------------------------------------------------------------
 async function activeWindow() {
   try {
+    if (native) return win32.foreground();
     return JSON.parse(await ask('info'));
   } catch {
     return { process: '', title: '' };
   }
 }
 
-// Give a Magpie window real keyboard focus even though another app is in front (see helper.ps1).
+// Give a Magpie window real keyboard focus even though another app is in front.
 async function focusWindow(handleBuffer) {
   try {
-    const h = handleBuffer.length >= 8 ? handleBuffer.readBigUInt64LE(0) : BigInt(handleBuffer.readUInt32LE(0));
-    await ask('focus ' + h.toString(), 1500);
+    if (native) return void win32.focusWindow(win32.hwndOf(handleBuffer));
+    await ask('focus ' + win32.hwndOf(handleBuffer), 1500);
   } catch {}
+}
+
+// Get the PowerShell helper (used for Ctrl+C) loaded and warm, so the first shortcut after startup or after the
+// laptop wakes doesn't wait for it.
+function warmUp() {
+  ask('info').catch(() => {});
 }
 
 // Copies whatever is selected in the focused app, then restores the clipboard.
@@ -74,7 +86,10 @@ async function captureSelection(app) {
   if (TERMINALS.has((info.process || '').toLowerCase())) return '';
   const prev = clipboard.readText();
   clipboard.writeText('');
-  await ask('copy');
+  if (native) {
+    // Holds Ctrl until the app has handled C (see win32.js): no stray "c", and NumLock is never touched.
+    if (!(await win32.sendCopySafely())) { clipboard.writeText(prev); return ''; }
+  } else await ask('copy'); // fallback only (SendKeys)
   // Stop as soon as the text arrives (usually 10 to 40 ms) instead of always waiting a fixed 120 ms.
   // With nothing selected the clipboard stays empty, so give up after about 140 ms.
   let sel = '';
@@ -105,4 +120,4 @@ async function screenshot(mode, windowTitle, id) {
   }
 }
 
-module.exports = { startHelper, stopHelper, activeWindow, captureSelection, screenshot, focusWindow };
+module.exports = { startHelper, stopHelper, activeWindow, captureSelection, screenshot, focusWindow, warmUp, native };

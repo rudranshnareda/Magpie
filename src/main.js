@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, screen, nativeImage, nativeTheme, shell, dialog } = require('electron');
+const { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, screen, nativeImage, nativeTheme, shell, dialog, powerMonitor } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -9,6 +9,7 @@ const providers = require('./providers');
 const store = require('./store');
 const vault = require('./vault');
 const sysinfo = require('./sysinfo');
+const win32 = require('./win32');
 const updater = require('./updater');
 
 const ICON = path.join(__dirname, '..', 'assets', 'icon.png');
@@ -178,10 +179,48 @@ async function openQuick({ question = '', selection = '', app: appInfo = {}, sho
 }
 
 // ---------------------------------------------------------------- hotkey / selection flows
-const held = new Set();
+// Modifier keys the input hook has seen go down (keycode -> when). Ctrl+C must not be sent while, say, Alt is still
+// held, or the app would receive Ctrl+Alt+C.
+const held = new Map();
+let lastHookEventAt = 0; // any key or mouse event seen by the input hook
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Windows silently removes input hooks that respond too slowly (it happens when a laptop wakes up). If the hook has
+// seen nothing for a while it may be dead, and what it last saw can't be trusted.
+const hookAlive = () => hookRunning && Date.now() - lastHookEventAt < 3000;
+const freshHeld = () => {
+  const now = Date.now();
+  for (const [k, t] of held) if (now - t > 3000) held.delete(k); // a modifier "held" for 3+ s is a missed key-up
+  return held.size;
+};
 async function waitModifiersReleased() {
-  for (let i = 0; i < 100 && held.size > 0; i++) await new Promise((r) => setTimeout(r, 10));
-  if (!hookRunning) await new Promise((r) => setTimeout(r, 350));
+  if (!hookAlive()) return sleep(200); // can't see the keyboard: assume an ordinary key press
+  for (let i = 0; i < 60 && freshHeld() > 0; i++) await sleep(10); // at most 0.6 s
+}
+
+// Before sending Ctrl+C into the user's app, every key of the shortcut must be let go: otherwise the app would get
+// e.g. Ctrl+Alt+C, and a still-held M would start typing "m" once our Ctrl is released. Windows is asked directly.
+// Returns false if keys are still down after 1.5 s; the selection is then skipped rather than risk stray keystrokes.
+const MOD_VKS = [0x10, 0x11, 0x12, 0x5b, 0x5c]; // Shift, Ctrl, Alt, left Win, right Win
+let hotkeyVk = null; // Windows key code of the shortcut's main key
+async function waitKeysReleased() {
+  if (!sysinfo.native) {
+    await waitModifiersReleased();
+    return true;
+  }
+  const vks = hotkeyVk != null ? [...MOD_VKS, hotkeyVk] : MOD_VKS;
+  const until = Date.now() + 1500;
+  while (Date.now() < until) {
+    if (!win32.anyDown(vks)) return true;
+    await sleep(10);
+  }
+  return false;
+}
+function vkFor(accel) {
+  const key = accel.split('+').pop();
+  if (/^[A-Z0-9]$/.test(key)) return key.charCodeAt(0);
+  const f = key.match(/^F(\d{1,2})$/);
+  if (f) return 0x6f + Number(f[1]);
+  return { Space: 0x20, Return: 0x0d, Tab: 0x09 }[key] ?? null;
 }
 
 async function gatherAndOpen(mode) {
@@ -198,11 +237,11 @@ async function gatherAndOpen(mode) {
   const opened = openQuick({ mode, late: true, hold: screenShot });
   // Read the focused app and its selection while that app still has the keyboard.
   const read = (async () => {
-    await waitModifiersReleased();
-    trace('keys released');
+    const free = await waitKeysReleased();
+    trace(free ? 'keys released' : 'keys still held after 1.5 s: selection skipped');
     const app = await sysinfo.activeWindow();
     trace('focused app identified');
-    const sel = await sysinfo.captureSelection(app);
+    const sel = free ? await sysinfo.captureSelection(app) : '';
     trace('selection read');
     return { app, sel };
   })();
@@ -220,13 +259,69 @@ async function gatherAndOpen(mode) {
   trace('popup: keyboard focus handed over');
 }
 
-// Both the OS shortcut and the AltGr fallback end up here; never fire twice for one key press.
+// Both the OS shortcut and the AltGr fallback end up here.
+// Holding the shortcut down makes Windows repeat it (after ~0.5 s, then every ~33 ms). Each repeat used to count as
+// a new press, and a second press closes an unused prompt, so a slightly long press opened and then closed it.
+let hotkeyMainCode = null; // input-hook keycode of the shortcut's main key (M in Ctrl+M), if known
+let mainReleasedSinceFire = true;
 function fireHotkey() {
-  if (Date.now() - lastFire < 500) return;
-  lastFire = Date.now();
-  T0 = Date.now();
+  const now = Date.now();
+  const since = now - lastFire;
+  lastFire = now; // updated by repeats too, so a held key keeps being recognised as the same press
+  const canSeeKeys = (sysinfo.native && hotkeyVk != null) || (hookAlive() && hotkeyMainCode !== null);
+  if (canSeeKeys) {
+    if (!mainReleasedSinceFire && since < 3000) return; // the key hasn't been let go since the last press
+  } else if (since < 1100) return; // can't see the keyboard: anything this soon is a repeat
+  mainReleasedSinceFire = false;
+  watchRelease();
+  T0 = now;
   trace('hotkey fired');
+  setTimeout(checkHookHealth, 400);
   toggleAsk();
+}
+
+// Notice when the shortcut's main key is let go (asked from Windows; the input hook reports it too when alive).
+let releaseTimer = null;
+function watchRelease() {
+  clearInterval(releaseTimer);
+  if (!sysinfo.native || hotkeyVk == null) return;
+  releaseTimer = setInterval(() => {
+    if (!win32.anyDown([hotkeyVk])) {
+      mainReleasedSinceFire = true;
+      clearInterval(releaseTimer);
+    }
+  }, 25);
+}
+
+// After a shortcut press, a working input hook must have seen keys go down. If it saw nothing, Windows has removed
+// it: put it back (otherwise the Ask button stops appearing and key tracking goes stale).
+function checkHookHealth() {
+  if (hookRunning && Date.now() - lastHookEventAt > 1500) restartHook('it stopped seeing keys');
+}
+let hook = null;
+function restartHook(reason) {
+  if (!hook) return;
+  trace('input hook restarted: ' + reason);
+  try { hook.stop(); } catch {}
+  held.clear();
+  try {
+    hook.start();
+    hookRunning = true;
+  } catch {
+    hookRunning = false;
+  }
+}
+
+// Input-hook keycode for the shortcut's main key, so we can see when it is let go.
+function mainKeyCode(accel) {
+  try {
+    const K = require('uiohook-napi').UiohookKey;
+    const key = accel.split('+').pop();
+    if (/^[A-Z0-9]$/.test(key) || /^F\d{1,2}$/.test(key)) return K[key] ?? null;
+    return { Space: K.Space, Return: K.Enter, Tab: K.Tab }[key] ?? null;
+  } catch {
+    return null;
+  }
 }
 
 // Spotlight behaviour: if a prompt is already open and you haven't asked yet, the shortcut closes it.
@@ -262,6 +357,9 @@ function registerHotkey(accel) {
   if (ok) {
     currentHotkey = accel;
     setAltGrFallback(accel);
+    hotkeyMainCode = mainKeyCode(accel);
+    hotkeyVk = vkFor(accel);
+    mainReleasedSinceFire = true;
     tray?.setToolTip(`Magpie (${accel.replace('Control', 'Ctrl')})`);
     return { ok: true };
   }
@@ -303,14 +401,21 @@ function showAskButton(px, py) {
 function startInputHooks() {
   try {
     const { uIOhook, UiohookKey: K } = require('uiohook-napi');
+    hook = uIOhook;
     const mods = new Set([K.Ctrl, K.CtrlRight, K.Alt, K.AltRight, K.Shift, K.ShiftRight, K.Meta, K.MetaRight]);
     uIOhook.on('keydown', (e) => {
-      if (mods.has(e.keycode)) return held.add(e.keycode);
+      lastHookEventAt = Date.now();
+      if (mods.has(e.keycode)) return void held.set(e.keycode, Date.now());
       if (altGrKey && e.keycode === altGrKey.code && held.has(altGrKey.altRight) && !held.has(altGrKey.ctrlRight)) fireHotkey();
     });
-    uIOhook.on('keyup', (e) => held.delete(e.keycode));
+    uIOhook.on('keyup', (e) => {
+      lastHookEventAt = Date.now();
+      held.delete(e.keycode);
+      if (e.keycode === hotkeyMainCode) mainReleasedSinceFire = true;
+    });
     let down = null;
     uIOhook.on('mousedown', (e) => {
+      lastHookEventAt = Date.now();
       down = { x: e.x, y: e.y, t: Date.now() };
       if (askBtn?.isVisible()) {
         const dip = process.platform === 'win32' ? screen.screenToDipPoint({ x: e.x, y: e.y }) : { x: e.x, y: e.y };
@@ -320,6 +425,7 @@ function startInputHooks() {
       }
     });
     uIOhook.on('mouseup', (e) => {
+      lastHookEventAt = Date.now();
       if (e.button !== 1 || !down || !store.getSettings().showAskButton) return;
       const dist = Math.hypot(e.x - down.x, e.y - down.y);
       const looksLikeSelection = (dist > 12 && Date.now() - down.t > 180) || e.clicks >= 2;
@@ -543,6 +649,15 @@ ipcMain.on('update:notes', () => {
   if (u.startsWith(`https://github.com/${updater.REPO}/`)) shell.openExternal(u);
 });
 
+// Test-only controls (never available in normal use): simulate Windows silently removing the input hook.
+if (process.env.MAGPIE_TEST_SEAMS) {
+  ipcMain.handle('test:hook', (_, action) => {
+    if (action === 'kill') { try { hook?.stop(); } catch {} } // hookRunning stays true, exactly like a silent removal
+    if (action === 'stuckCtrl') held.set(29, Date.now()); // a Ctrl whose key-up was never seen
+    return { hookRunning, msSinceHookEvent: Date.now() - lastHookEventAt, held: [...held.keys()], native: sysinfo.native };
+  });
+}
+
 ipcMain.handle('app:status', () =>
   new Promise((resolve) => {
     execFile('claude', ['--version'], { windowsHide: true, timeout: 8000 }, (err, out) =>
@@ -560,7 +675,7 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(() => {
     Menu.setApplicationMenu(null); // no menu bar: otherwise pressing Alt steals the next key (breaks Alt+<key> shortcuts)
     nativeTheme.themeSource = 'system';
-    sysinfo.startHelper();
+    sysinfo.warmUp(); // only the PowerShell fallback needs warming; the native path is instant
     tray = new Tray(nativeImage.createFromPath(ICON).resize({ width: 32, height: 32 }));
     tray.on('click', () => showMain());
     tray.setContextMenu(
@@ -576,7 +691,18 @@ if (!app.requestSingleInstanceLock()) {
     createAskButton();
     startInputHooks();
     setTimeout(prepareSpare, 1500); // have the first popup loaded and waiting before the shortcut is first used
-    setTimeout(() => sysinfo.activeWindow(), 2500); // run the helper's first (slow, cold) command now, not on first use
+    setTimeout(() => sysinfo.warmUp(), 2500);
+    // After sleep or the lock screen Windows may have removed the input hook and missed key releases. Start fresh,
+    // so the first shortcut after opening the laptop behaves like any other.
+    const onWake = (why) => {
+      held.clear();
+      mainReleasedSinceFire = true;
+      setTimeout(() => restartHook(why), 1000);
+      setTimeout(prepareSpare, 1200);
+      sysinfo.warmUp();
+    };
+    powerMonitor.on('resume', () => onWake('woke from sleep'));
+    powerMonitor.on('unlock-screen', () => onWake('screen unlocked'));
     // Quiet once-a-day check. It only looks; installing always needs a click.
     setTimeout(() => {
       const s = store.getSettings();

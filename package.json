@@ -1,6 +1,6 @@
 {
   "name": "magpie",
-  "version": "0.3.10",
+  "version": "0.3.11",
   "description": "Select text anywhere, ask Magpie, get a floating answer. Keeps a searchable log and a linked notes vault.",
   "main": "src/main.js",
   "author": "rudranshnareda",
@@ -11,6 +11,7 @@
     "dist": "electron-builder --win nsis"
   },
   "dependencies": {
+    "koffi": "3.3.4",
     "uiohook-napi": "^1.5.4"
   },
   "devDependencies": {
