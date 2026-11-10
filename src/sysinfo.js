@@ -1,5 +1,5 @@
 // Things Magpie can look at: the focused app, the current selection, a screenshot.
-const { clipboard, desktopCapturer, screen } = require('electron');
+const { clipboard, desktopCapturer, screen, nativeImage } = require('electron');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -101,10 +101,28 @@ async function captureSelection(app) {
   return sel;
 }
 
+// The whole screen under the cursor, straight from Windows. Fast enough (~40 ms) to take before the popup appears.
+function nativeScreenJpeg(d) {
+  const r = screen.dipToScreenRect(null, d.bounds); // physical pixels
+  const px = win32.captureRect(r.x, r.y, r.width, r.height);
+  if (!px) return null;
+  let img = nativeImage.createFromBitmap(px, { width: r.width, height: r.height });
+  if (r.width > 1920) img = img.resize({ width: 1920 });
+  return img.isEmpty() ? null : img.toJPEG(72);
+}
+
 async function screenshot(mode, windowTitle, id) {
   if (mode !== 'window' && mode !== 'screen') return null;
   try {
     const d = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+    if (mode === 'screen' && native) {
+      const jpg = nativeScreenJpeg(d);
+      if (jpg) {
+        const file = `${id}.jpg`;
+        fs.writeFileSync(path.join(store.shotsDir(), file), jpg);
+        return file;
+      }
+    }
     const w = Math.min(1920, Math.round(d.size.width * d.scaleFactor));
     const h = Math.round((w * d.size.height) / d.size.width);
     const sources = await desktopCapturer.getSources({ types: mode === 'window' ? ['window', 'screen'] : ['screen'], thumbnailSize: { width: w, height: h } });

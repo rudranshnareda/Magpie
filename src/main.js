@@ -91,11 +91,16 @@ function createQuickWindow() {
   win.loadFile(UI('quick.html'));
   return { win, ready };
 }
+// A spare whose page process died would open as an empty box: replace it.
+const spareUsable = () => spare && !spare.win.isDestroyed() && !spare.win.webContents.isCrashed();
 const prepareSpare = () => {
-  if (!spare || spare.win.isDestroyed()) spare = createQuickWindow();
+  if (!spareUsable()) {
+    if (spare && !spare.win.isDestroyed()) spare.win.destroy();
+    spare = createQuickWindow();
+  }
 };
 async function takeQuickWindow() {
-  if (!spare || spare.win.isDestroyed()) spare = createQuickWindow(); // not ready yet (first second after launch)
+  prepareSpare(); // normally already loaded; only the first second after launch has to wait
   const s = spare;
   spare = null;
   await s.ready;
@@ -304,6 +309,22 @@ function watchRelease() {
 function checkHookHealth() {
   if (hookRunning && Date.now() - lastHookEventAt > 1500) restartHook('it stopped seeing keys');
 }
+// Windows can silently remove the input hook at any time (typically around sleep, or when the PC is very busy), and
+// then the Ask button simply never appears again. Checking only when the shortcut is pressed wasn't enough, so this
+// also compares, every few seconds, the last input Windows saw with the last event the hook saw.
+let lastWatchdogRestart = 0;
+function watchHook() {
+  if (!hookRunning || !sysinfo.native) return;
+  const since = win32.msSinceInput();
+  if (since == null) return;
+  const lastInputAt = Date.now() - since;
+  // input arrived well after the hook last heard anything (rate-limited: input to an app running as administrator
+  // never reaches the hook, which would otherwise mean a restart every few seconds)
+  if (lastInputAt - lastHookEventAt > 2000 && Date.now() - lastWatchdogRestart > 15000) {
+    lastWatchdogRestart = Date.now();
+    restartHook('it missed recent input');
+  }
+}
 let hook = null;
 function restartHook(reason) {
   if (!hook) return;
@@ -313,6 +334,7 @@ function restartHook(reason) {
   try {
     hook.start();
     hookRunning = true;
+    lastHookEventAt = Date.now();
   } catch {
     hookRunning = false;
   }
@@ -388,13 +410,26 @@ function createAskButton() {
   });
   askBtn.setAlwaysOnTop(true, 'screen-saver');
   askBtn.loadFile(UI('askbtn.html'));
+  // If the button's page process dies, the window still "shows" but draws nothing. Build a fresh one.
+  askBtn.webContents.on('render-process-gone', () => {
+    if (quitting) return;
+    trace('ask button page died: rebuilt');
+    const dead = askBtn;
+    askBtn = null;
+    dead.destroy();
+    createAskButton();
+  });
 }
 function hideAskButton() {
   clearTimeout(askBtnTimer);
   if (askBtn && !askBtn.isDestroyed() && askBtn.isVisible()) askBtn.hide();
 }
 function showAskButton(px, py) {
-  if (!askBtn || askBtn.isDestroyed()) return;
+  if (!askBtn || askBtn.isDestroyed() || askBtn.webContents.isCrashed()) {
+    if (askBtn && !askBtn.isDestroyed()) askBtn.destroy();
+    createAskButton(); // ready for the next selection
+    return;
+  }
   const dip = process.platform === 'win32' ? screen.screenToDipPoint({ x: px, y: py }) : { x: px, y: py };
   const d = screen.getDisplayNearestPoint(dip).workArea;
   const b = askBtn.getBounds();
@@ -409,19 +444,17 @@ function startInputHooks() {
     const { uIOhook, UiohookKey: K } = require('uiohook-napi');
     hook = uIOhook;
     const mods = new Set([K.Ctrl, K.CtrlRight, K.Alt, K.AltRight, K.Shift, K.ShiftRight, K.Meta, K.MetaRight]);
+    uIOhook.on('input', () => (lastHookEventAt = Date.now())); // every event, mouse moves included: the hook is alive
     uIOhook.on('keydown', (e) => {
-      lastHookEventAt = Date.now();
       if (mods.has(e.keycode)) return void held.set(e.keycode, Date.now());
       if (altGrKey && e.keycode === altGrKey.code && held.has(altGrKey.altRight) && !held.has(altGrKey.ctrlRight)) fireHotkey();
     });
     uIOhook.on('keyup', (e) => {
-      lastHookEventAt = Date.now();
       held.delete(e.keycode);
       if (e.keycode === hotkeyMainCode) mainReleasedSinceFire = true;
     });
     let down = null;
     uIOhook.on('mousedown', (e) => {
-      lastHookEventAt = Date.now();
       down = { x: e.x, y: e.y, t: Date.now() };
       if (askBtn?.isVisible()) {
         const dip = process.platform === 'win32' ? screen.screenToDipPoint({ x: e.x, y: e.y }) : { x: e.x, y: e.y };
@@ -431,7 +464,6 @@ function startInputHooks() {
       }
     });
     uIOhook.on('mouseup', (e) => {
-      lastHookEventAt = Date.now();
       if (e.button !== 1 || !down || !store.getSettings().showAskButton) return;
       const dist = Math.hypot(e.x - down.x, e.y - down.y);
       const looksLikeSelection = (dist > 12 && Date.now() - down.t > 180) || e.clicks >= 2;
@@ -441,6 +473,8 @@ function startInputHooks() {
     });
     uIOhook.start();
     hookRunning = true;
+    lastHookEventAt = Date.now();
+    setInterval(watchHook, 4000);
   } catch (err) {
     console.error('Input hook unavailable; the Ask button is disabled, the hotkey still works.', err.message);
   }
