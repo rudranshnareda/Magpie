@@ -402,9 +402,11 @@ function registerHotkey(accel) {
 }
 
 // ---------------------------------------------------------------- floating "Ask Magpie" button
+const ASK_W = 140;
+const ASK_H = 40;
 function createAskButton() {
   askBtn = new BrowserWindow({
-    width: 140, height: 40, frame: false, transparent: true, alwaysOnTop: true, skipTaskbar: true,
+    width: ASK_W, height: ASK_H, frame: false, transparent: true, alwaysOnTop: true, skipTaskbar: true,
     focusable: false, resizable: false, show: false, hasShadow: false,
     webPreferences: { preload: PRELOAD, contextIsolation: true },
   });
@@ -432,8 +434,14 @@ function showAskButton(px, py) {
   }
   const dip = process.platform === 'win32' ? screen.screenToDipPoint({ x: px, y: py }) : { x: px, y: py };
   const d = screen.getDisplayNearestPoint(dip).workArea;
-  const b = askBtn.getBounds();
-  askBtn.setPosition(Math.round(Math.min(Math.max(dip.x + 8, d.x), d.x + d.width - b.width)), Math.round(Math.min(Math.max(dip.y + 16, d.y), d.y + d.height - b.height)));
+  // Size is always given, never read back: at 125% / 150% scaling each read-back-and-move added a pixel or two,
+  // so the button grew wider every time it appeared (the same rounding that once made the popup widen).
+  askBtn.setBounds({
+    x: snap4(Math.min(Math.max(dip.x + 8, d.x), d.x + d.width - ASK_W)),
+    y: snap4(Math.min(Math.max(dip.y + 16, d.y), d.y + d.height - ASK_H)),
+    width: ASK_W,
+    height: ASK_H,
+  });
   askBtn.showInactive();
   engine.prewarm(store.currentProvider()); // they probably will click it
   clearTimeout(askBtnTimer);
@@ -466,7 +474,9 @@ function startInputHooks() {
     uIOhook.on('mouseup', (e) => {
       if (e.button !== 1 || !down || !store.getSettings().showAskButton) return;
       const dist = Math.hypot(e.x - down.x, e.y - down.y);
-      const looksLikeSelection = (dist > 12 && Date.now() - down.t > 180) || e.clicks >= 2;
+      // A drag across text or a double/triple click. The limits used to be 12 px and 180 ms, which missed quick
+      // drags over a short word, so the button seemed to appear only sometimes.
+      const looksLikeSelection = (dist > 8 && Date.now() - down.t > 100) || e.clicks >= 2;
       down = null;
       if (!looksLikeSelection || BrowserWindow.getFocusedWindow()) return;
       showAskButton(e.x, e.y);
