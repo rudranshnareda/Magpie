@@ -111,6 +111,48 @@ function nativeScreenJpeg(d) {
   return img.isEmpty() ? null : img.toJPEG(72);
 }
 
+// Full-resolution pixels of one display, for the snip overlay: { width, height, data } with data in BGRA order.
+async function captureDisplay(d) {
+  if (native) {
+    const r = screen.dipToScreenRect(null, d.bounds);
+    const px = win32.captureRect(r.x, r.y, r.width, r.height);
+    if (px) return { width: r.width, height: r.height, data: px };
+  }
+  try {
+    const width = Math.round(d.size.width * d.scaleFactor), height = Math.round(d.size.height * d.scaleFactor);
+    const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width, height } });
+    const src = sources.find((s) => s.display_id === String(d.id)) || sources[0];
+    if (!src || src.thumbnail.isEmpty()) return null;
+    const sz = src.thumbnail.getSize();
+    return { width: sz.width, height: sz.height, data: src.thumbnail.toBitmap() };
+  } catch {
+    return null;
+  }
+}
+
+// Text in an image file, read by Windows' built-in OCR (offline). Snips are enlarged first: OCR misses words in
+// screen-sized text (it skipped every spell-check-underlined word in a test), and reads it reliably at 3x.
+async function ocr(file) {
+  let input = file, temp = null;
+  try {
+    const img = nativeImage.createFromPath(file);
+    const { width, height } = img.getSize();
+    const k = width < 1200 && height < 900 ? 3 : width < 2000 && height < 1600 ? 2 : 1;
+    if (width && k > 1) {
+      temp = file.replace(/\.png$/i, '') + '.ocr.png';
+      fs.writeFileSync(temp, img.resize({ width: width * k, quality: 'best' }).toPNG());
+      input = temp;
+    }
+    const line = await ask('ocr ' + input, 15000);
+    if (!line) throw new Error('Reading the text took too long.');
+    const r = JSON.parse(line);
+    if (r.error) throw new Error(r.error);
+    return String(r.text || '').trim();
+  } finally {
+    if (temp) fs.rmSync(temp, { force: true });
+  }
+}
+
 async function screenshot(mode, windowTitle, id) {
   if (mode !== 'window' && mode !== 'screen') return null;
   try {
@@ -138,4 +180,4 @@ async function screenshot(mode, windowTitle, id) {
   }
 }
 
-module.exports = { startHelper, stopHelper, activeWindow, captureSelection, screenshot, focusWindow, warmUp, native };
+module.exports = { startHelper, stopHelper, activeWindow, captureSelection, screenshot, captureDisplay, ocr, focusWindow, warmUp, native };

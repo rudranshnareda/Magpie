@@ -10,13 +10,22 @@ You MUST wrap 2-4 technical terms the reader may not know in [[double brackets]]
 (e.g. "uses [[photolithography]] to etch the chip"), every time, so they become clickable.
 Use the already-known terms and the parent trail (if given) to avoid re-explaining and to stay in context.`;
 
-function buildPrompt({ question = '', selection = '', trail = [], known = [], app = null, from = null }) {
+const TRANSLATE_SYSTEM = `You are Magpie's translator. Translate the text the reader gives you.
+Rules: output only the translation, keeping the line breaks and lists of the original. No preamble, no notes,
+no quotation marks around it. Then add one final line: (Translated from <source language>)`;
+
+// `withImage`: the snip itself is attached to the request (the provider can look at images).
+function buildPrompt({ question = '', selection = '', trail = [], known = [], app = null, from = null, snip = null }, withImage = false) {
   let p = '';
   if (app && (app.process || app.title)) p += `The reader is currently in (background only, not the topic): ${[app.process, app.title].filter(Boolean).join(' - ')}\n`;
   if (trail.length) p += `Parent trail (what the reader came from): ${trail.join(' > ')}\n`;
   if (known.length) p += `Terms the reader already knows (do not explain): ${known.slice(-200).join(', ')}\n`;
   p += '\n';
-  if (from && (from.answer || from.question)) {
+  if (snip) {
+    p += `The reader drew around part of their screen${withImage ? ' (the image is attached)' : ''}.\n`;
+    if (snip.ocr) p += `Text read from it by OCR (it may contain misread letters: read past them, never point them out):\n"""\n${String(snip.ocr).slice(0, 6000)}\n"""\n`;
+    p += question ? `Their question about it: ${question}` : 'Explain what it shows.';
+  } else if (from && (from.answer || from.question)) {
     // a term clicked inside an earlier answer: explain it as used there
     p += `The reader was reading an explanation`;
     if (from.question || from.selection) p += ` of "${String(from.question || from.selection).slice(0, 300)}"`;
@@ -27,6 +36,12 @@ function buildPrompt({ question = '', selection = '', trail = [], known = [], ap
   else if (selection) p += `Explain this passage the reader selected:\n"""\n${selection}\n"""`;
   else p += question;
   return p;
+}
+
+function buildTranslatePrompt({ snip = null, selection = '', target = 'English' }) {
+  const text = (snip && snip.ocr) || selection;
+  const otherwise = target === 'English' ? 'reply with one short line saying it is already in English' : 'translate it into English instead';
+  return `Translate this into ${target}. If it is already in ${target}, ${otherwise}.\n"""\n${String(text).slice(0, 8000)}\n"""`;
 }
 
 // ================================================================== Claude Code (warm spare)
@@ -201,7 +216,7 @@ const needModel = (cfg) => {
   if (!cfg.model) throw new Error(`Choose a model for ${cfg.label} in Settings.`);
 };
 
-function viaOpenAI(prompt, onDelta, cfg) {
+function viaOpenAI(prompt, onDelta, cfg, { system = SYSTEM, image = null } = {}) {
   needKey(cfg); needModel(cfg);
   if (!cfg.baseUrl) throw new Error('Set the base URL in Settings.');
   const url = cfg.baseUrl.replace(/\/+$/, '') + '/chat/completions';
@@ -209,33 +224,45 @@ function viaOpenAI(prompt, onDelta, cfg) {
     sse(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...(cfg.apiKey ? { authorization: `Bearer ${cfg.apiKey}` } : {}) },
-      body: JSON.stringify({ model: cfg.model, stream: true, temperature: 0.3, messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: prompt }] }),
+      body: JSON.stringify({
+        model: cfg.model, stream: true, temperature: 0.3,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: image ? [{ type: 'text', text: prompt }, { type: 'image_url', image_url: { url: `data:${image.mime};base64,${image.data}` } }] : prompt },
+        ],
+      }),
     }, signal, (ev) => {
       if (ev.error) throw new Error(ev.error.message || 'API error');
       const t = ev.choices?.[0]?.delta?.content;
       if (t) emit(t);
     }), onDelta);
 }
-function viaAnthropic(prompt, onDelta, cfg) {
+function viaAnthropic(prompt, onDelta, cfg, { system = SYSTEM, image = null } = {}) {
   needKey(cfg); needModel(cfg);
   return viaHttp((signal, emit) =>
     sse(`${(cfg.baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '')}/v1/messages`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-api-key': cfg.apiKey, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: cfg.model, max_tokens: 800, stream: true, system: SYSTEM, messages: [{ role: 'user', content: prompt }] }),
+      body: JSON.stringify({
+        model: cfg.model, max_tokens: 800, stream: true, system,
+        messages: [{ role: 'user', content: image ? [{ type: 'image', source: { type: 'base64', media_type: image.mime, data: image.data } }, { type: 'text', text: prompt }] : prompt }],
+      }),
     }, signal, (ev) => {
       if (ev.type === 'error') throw new Error(ev.error?.message || 'API error');
       if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta') emit(ev.delta.text);
     }), onDelta);
 }
-function viaGemini(prompt, onDelta, cfg) {
+function viaGemini(prompt, onDelta, cfg, { system = SYSTEM, image = null } = {}) {
   needKey(cfg); needModel(cfg);
   const url = `${(cfg.baseUrl || 'https://generativelanguage.googleapis.com').replace(/\/+$/, '')}/v1beta/models/${encodeURIComponent(cfg.model)}:streamGenerateContent?alt=sse`;
   return viaHttp((signal, emit) =>
     sse(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-goog-api-key': cfg.apiKey },
-      body: JSON.stringify({ systemInstruction: { parts: [{ text: SYSTEM }] }, contents: [{ role: 'user', parts: [{ text: prompt }] }] }),
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: system }] },
+        contents: [{ role: 'user', parts: [...(image ? [{ inline_data: { mime_type: image.mime, data: image.data } }] : []), { text: prompt }] }],
+      }),
     }, signal, (ev) => {
       if (ev.error) throw new Error(ev.error.message || 'API error');
       const t = (ev.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('');
@@ -244,23 +271,54 @@ function viaGemini(prompt, onDelta, cfg) {
 }
 
 // ================================================================== public API
-function explain(input, onDelta, cfg) {
-  const prompt = buildPrompt(input);
-  const failed = (e) => ({ promise: Promise.reject(e), cancel() {} });
+const failed = (e) => ({ promise: Promise.reject(e), cancel() {} });
+const SEES_IMAGES = new Set(['openai', 'anthropic', 'gemini']); // providers that can be sent an image at all
+
+function run(prompt, onDelta, cfg, { system, image }) {
   try {
     switch (cfg.type) {
-      case 'claude-cli': return viaClaude(prompt, onDelta, cfg);
-      case 'cli-gemini': return viaCommand(`${cfg.command || 'gemini'}${modelFlag(cfg)} -p "Follow the instructions in the input."`, `${SYSTEM}\n\n${prompt}`, onDelta);
-      case 'cli-codex': return viaCommand(`${cfg.command || 'codex'} exec --skip-git-repo-check -s read-only${modelFlag(cfg)} -`, `${SYSTEM}\n\n${prompt}`, onDelta);
-      case 'cli-custom': return viaCommand(cfg.command, `${SYSTEM}\n\n${prompt}`, onDelta);
-      case 'anthropic': return viaAnthropic(prompt, onDelta, cfg);
-      case 'gemini': return viaGemini(prompt, onDelta, cfg);
-      case 'openai': return viaOpenAI(prompt, onDelta, cfg);
+      // Claude Code is pre-started with the usual instructions, so other instructions travel in the prompt
+      case 'claude-cli': return viaClaude(system === SYSTEM ? prompt : `${system}\n\n${prompt}`, onDelta, cfg);
+      case 'cli-gemini': return viaCommand(`${cfg.command || 'gemini'}${modelFlag(cfg)} -p "Follow the instructions in the input."`, `${system}\n\n${prompt}`, onDelta);
+      case 'cli-codex': return viaCommand(`${cfg.command || 'codex'} exec --skip-git-repo-check -s read-only${modelFlag(cfg)} -`, `${system}\n\n${prompt}`, onDelta);
+      case 'cli-custom': return viaCommand(cfg.command, `${system}\n\n${prompt}`, onDelta);
+      case 'anthropic': return viaAnthropic(prompt, onDelta, cfg, { system, image });
+      case 'gemini': return viaGemini(prompt, onDelta, cfg, { system, image });
+      case 'openai': return viaOpenAI(prompt, onDelta, cfg, { system, image });
       default: return failed(new Error(`Unknown provider type: ${cfg.type}`));
     }
   } catch (e) {
     return failed(e);
   }
+}
+
+// A model that only reads text rejects a request with an image (Groq's gpt-oss, for example) with an error like
+// "400 ... does not support image input". Then the question is asked again with just the text read from the snip.
+const imageRefused = (msg) => /^4(00|04|13|15|22)\b/.test(msg) || /image|vision|multimodal|modalit/i.test(msg);
+const noVision = (cfg) => new Error(`No text was found in the snip, and ${cfg.label}${cfg.model ? ` (${cfg.model})` : ''} can't look at images. In Settings, pick a model that can, for example Google Gemini API (free).`);
+
+// input.snip: { image: { mime, data (base64) } | null, ocr: text read from it }.
+// input.mode 'translate': translate the snip's text (or the selection) into input.target.
+function explain(input, onDelta, cfg) {
+  if (input.mode === 'translate') {
+    if (!((input.snip && input.snip.ocr) || input.selection)) return failed(new Error('No text was found to translate.'));
+    return run(buildTranslatePrompt(input), onDelta, cfg, { system: TRANSLATE_SYSTEM, image: null });
+  }
+  const snip = input.snip;
+  const canSee = !!(snip && snip.image && SEES_IMAGES.has(cfg.type));
+  if (snip && !canSee && !snip.ocr) return failed(noVision(cfg));
+  if (!canSee) return run(buildPrompt(input, false), onDelta, cfg, { system: SYSTEM, image: null });
+
+  let job, cancelled = false, emitted = false;
+  const track = (t) => { emitted = true; onDelta(t); };
+  job = run(buildPrompt(input, true), track, cfg, { system: SYSTEM, image: snip.image });
+  const promise = job.promise.catch((e) => {
+    if (cancelled || emitted || !imageRefused(String(e.message))) throw e;
+    if (!snip.ocr) throw noVision(cfg);
+    job = run(buildPrompt(input, false), track, cfg, { system: SYSTEM, image: null });
+    return job.promise;
+  });
+  return { promise, cancel: () => { cancelled = true; job.cancel(); } };
 }
 
 // Start the slow part early (only Claude Code has one).

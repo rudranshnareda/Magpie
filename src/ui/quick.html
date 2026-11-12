@@ -5,7 +5,7 @@
   html, body { overflow: hidden; user-select: none; }
   #app { display: flow-root; position: relative; background: var(--glass); box-shadow: inset 0 0 0 1px var(--hairline); -webkit-app-region: drag; animation: pop .2s cubic-bezier(.2,.8,.2,1); }
   @keyframes pop { from { opacity: 0; transform: translateY(-6px) scale(.985); } to { opacity: 1; transform: none; } }
-  input, button, #out, .x, #chip { -webkit-app-region: no-drag; }
+  input, button, #out, .x, #chip, #snip { -webkit-app-region: no-drag; }
   .grip { height: 14px; display: flex; justify-content: center; align-items: flex-end; }
   .grip::after { content: ''; width: 34px; height: 4px; border-radius: 2px; background: var(--text-3); opacity: .55; margin-bottom: 1px; }
   .bar { display: flex; align-items: flex-start; gap: 12px; padding: 4px 20px 16px; }
@@ -21,6 +21,14 @@
   #chip .x { position: absolute; right: 8px; top: 8px; width: 20px; height: 20px; border-radius: 10px; display: grid; place-items: center; cursor: pointer; color: var(--text-2); }
   #chip .x:hover { background: var(--fill-2); color: var(--text); }
   #chiptxt { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  #snip { display: none; margin: 0 20px 16px; padding: 8px 32px 8px 8px; background: var(--fill); border-radius: 12px; gap: 12px; align-items: flex-start; position: relative; }
+  #snip img { max-width: 240px; max-height: 56px; border-radius: 7px; box-shadow: 0 0 0 1px var(--sep); flex: none; }
+  #snip .t { min-width: 0; font-size: 13px; color: var(--text-2); padding-top: 1px; }
+  #snip .t b { display: block; font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--text-3); margin-bottom: 2px; }
+  #sniptxt { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; user-select: text; }
+  #snip .x { position: absolute; right: 8px; top: 8px; width: 20px; height: 20px; border-radius: 10px; display: grid; place-items: center; cursor: pointer; color: var(--text-2); }
+  #snip .x:hover { background: var(--fill-2); color: var(--text); }
+  .ocr { white-space: pre-wrap; margin: 0; font-size: 14px; line-height: 1.55; }
   #ans { display: none; border-top: 1px solid var(--sep); }
   #out { max-height: 360px; overflow: auto; padding: 16px 22px 14px; user-select: text; }
   #out.busy .prose > :last-child::after { content: ''; display: inline-block; width: 7px; height: 15px; background: var(--accent); border-radius: 2px; margin-left: 3px; vertical-align: -2px; animation: blink 1s steps(2) infinite; }
@@ -44,6 +52,8 @@
   </div>
   <div id="chip"><b>Selected text</b><span id="chiptxt"></span>
     <span class="x" id="x" title="Ignore the selection"><svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7"/></svg></span></div>
+  <div id="snip"><img id="snipimg" alt="Your snip"><div class="t"><b>Your snip</b><span id="sniptxt">Reading text…</span></div>
+    <span class="x" id="snipx" title="Leave the snip out"><svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7"/></svg></span></div>
   <div id="ans">
     <div id="out"></div>
     <div class="foot">
@@ -58,20 +68,21 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let raw = '', asked = false, selection = '', busy = false, engine = '';
+let snip = null, keep = false; // snip: { mode } while a snip is attached. keep: stay open when clicking away.
 const setMsg = (t) => ($('msg').textContent = t || '');
 const draw = () => { $('out').innerHTML = '<div class="prose">' + renderMd(raw) + '</div>'; $('out').scrollTop = $('out').scrollHeight; };
 
-function ask(question) {
+function ask(question, mode) {
   if (busy) return;
   question = question.trim();
-  if (!question && !selection) return;
+  if (!question && !selection && !snip) return;
   asked = true; busy = true; raw = '';
   $('ans').style.display = 'block';
   $('out').className = 'busy';
   $('out').innerHTML = '<div class="sk" style="width:92%"></div><div class="sk" style="width:78%"></div><div class="sk" style="width:55%"></div>';
   $('save').disabled = true; $('copy').disabled = true; setMsg('');
   $('hint').textContent = 'Return to ask again';
-  magpie.send('quick:ask', { question });
+  magpie.send('quick:ask', { question, mode });
 }
 // The popup appears the instant the shortcut is pressed. The selected text is read a moment later and
 // arrives separately ('selection'), so the box is usable immediately and the chip fills in when ready.
@@ -83,15 +94,52 @@ const showSelection = (sel) => {
   $('q').placeholder = 'Ask about this…';
   $('hint').textContent = 'Return to explain';
 };
-magpie.on('init', ({ question, selection: sel, autoAsk, engine: eng }) => {
+magpie.on('init', ({ question, selection: sel, autoAsk, engine: eng, snip: sn }) => {
   engine = eng || '';
   $('eng').textContent = engine;
   showSelection(sel);
+  if (sn) showSnip(sn);
   if (question) { $('q').value = question; grow(); }
   if (autoAsk) ask(question);
   $('q').focus();
 });
 magpie.on('selection', ({ selection: sel }) => showSelection(sel));
+
+// ---- snips (the snip shortcut): Ask, Translate, or Copy text
+function showSnip(sn) {
+  snip = sn;
+  $('snipimg').src = sn.thumb;
+  $('snip').style.display = 'flex';
+  $('q').placeholder = 'Ask about this…';
+  $('hint').textContent = 'Return to explain';
+  if (sn.mode === 'translate') { $('q').value = 'Translate'; grow(); ask('Translate', 'translate'); }
+  if (sn.mode === 'text') {
+    keep = true;
+    $('ans').style.display = 'block';
+    $('out').className = 'busy';
+    $('out').innerHTML = '<div class="sk" style="width:86%"></div><div class="sk" style="width:64%"></div>';
+  }
+}
+magpie.on('snip:ocr', ({ text, copied }) => {
+  if (!snip) return;
+  $('sniptxt').textContent = text ? text.replace(/\s+/g, ' ') : 'No text found in it.';
+  if (snip.mode !== 'text' || asked) return;
+  $('out').className = '';
+  if (!text) { $('out').innerHTML = '<div class="err">No text was found in the snip.</div>'; return; }
+  raw = text;
+  $('out').innerHTML = '<p class="ocr"></p>';
+  $('out').firstChild.textContent = text;
+  $('copy').disabled = false;
+  setMsg(copied ? 'Copied to the clipboard' : '');
+  $('hint').textContent = 'Return to ask about it';
+});
+$('snipx').onclick = () => {
+  snip = null; keep = false;
+  $('snip').style.display = 'none';
+  if (!selection) { $('q').placeholder = 'Ask Magpie anything'; $('hint').textContent = 'Return'; }
+  magpie.send('quick:clearSel');
+  $('q').focus();
+};
 magpie.on('delta', (c) => { raw += c; draw(); });
 magpie.on('done', () => { busy = false; $('out').className = ''; draw(); $('save').disabled = !raw; $('copy').disabled = !raw; setMsg('Click a blue term to dig deeper'); });
 magpie.on('error', (m) => {
@@ -118,7 +166,7 @@ $('dismiss').onclick = () => magpie.send('quick:dismiss');
 addEventListener('keydown', (e) => { if (e.key === 'Escape') magpie.send('quick:dismiss'); });
 // Spotlight-style: clicking away from a prompt you haven't asked yet dismisses it, typed text or not.
 // Once you've asked, the answer stays until you close it.
-addEventListener('blur', () => setTimeout(() => { if (!asked && !document.hasFocus()) magpie.send('quick:dismiss'); }, 200));
+addEventListener('blur', () => setTimeout(() => { if (!asked && !keep && !document.hasFocus()) magpie.send('quick:dismiss'); }, 200));
 // Keep the window exactly as tall as its content (measured with sub-pixel precision, margins included).
 const fit = () => magpie.send('quick:resize', Math.ceil($('app').getBoundingClientRect().height));
 new ResizeObserver(fit).observe($('app'));

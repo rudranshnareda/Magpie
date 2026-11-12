@@ -2,7 +2,10 @@
 # Reads one command per line on stdin, writes one line of output per command.
 #   info -> {"process":"chrome","title":"..."} for the focused window
 #   copy -> sends Ctrl+C to the focused window, prints ok
+#   ocr <path> -> {"text":"..."} read from the image with Windows' built-in OCR (or {"error":"..."})
 $ErrorActionPreference = 'SilentlyContinue'
+# UTF-8 without a byte-order mark, so window titles and OCR text in any language arrive intact
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -22,6 +25,40 @@ public class MagpieWin {
 "@
 $wsh = New-Object -ComObject WScript.Shell
 function Out-Line($s) { [Console]::Out.WriteLine($s); [Console]::Out.Flush() }
+
+# ---- OCR (Windows.Media.Ocr: offline, uses the OCR languages installed with Windows). Loaded on first use.
+$ocrEngine = $null
+$asTaskOp = $null
+function Await($op, $type) {
+  $task = $script:asTaskOp.MakeGenericMethod($type).Invoke($null, @($op))
+  $task.Wait(-1) | Out-Null
+  $task.Result
+}
+function Init-Ocr {
+  if ($script:ocrEngine) { return }
+  Add-Type -AssemblyName System.Runtime.WindowsRuntime
+  $script:asTaskOp = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+    $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
+  [void][Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime]
+  [void][Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]
+  [void][Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics, ContentType = WindowsRuntime]
+  $script:ocrEngine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+}
+function Read-Text($path) {
+  Init-Ocr
+  if (-not $script:ocrEngine) { return @{ error = 'Windows has no OCR language installed.' } }
+  $stream = $null
+  try {
+    $file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($path)) ([Windows.Storage.StorageFile])
+    $stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
+    $decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+    $bitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+    $result = Await ($script:ocrEngine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
+    return @{ text = (($result.Lines | ForEach-Object { $_.Text }) -join "`n") }
+  } finally {
+    if ($stream) { $stream.Dispose() }
+  }
+}
 # Test-only: simulate a sluggish PC (e.g. right after waking from sleep). Never set in normal use.
 $testDelay = [int]("0" + $env:MAGPIE_TEST_HELPER_DELAY_MS)
 Out-Line 'ready'
@@ -66,6 +103,12 @@ while ($true) {
     [void][MagpieWin]::SetForegroundWindow($h)
     if ($attached) { [void][MagpieWin]::AttachThreadInput($me, $fgThread, $false) }
     Out-Line 'ok'
+  }
+  elseif ($line -like 'ocr *') {
+    # always exactly one line back, even on failure, so replies never get out of step with requests
+    try { $r = Read-Text $line.Substring(4) } catch { $r = @{ error = $_.Exception.GetBaseException().Message } }
+    if (-not $r) { $r = @{ error = 'OCR failed.' } }
+    Out-Line ($r | ConvertTo-Json -Compress)
   }
   else { Out-Line 'unknown' }
 }

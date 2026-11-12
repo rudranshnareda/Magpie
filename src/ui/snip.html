@@ -1,0 +1,183 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Magpie snip</title>
+<link rel="stylesheet" href="theme.css">
+<style>
+  html, body { background: #000; overflow: hidden; user-select: none; cursor: crosshair; }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+  .pill {
+    position: fixed; top: 22px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 10px;
+    padding: 8px 8px 8px 16px; border-radius: 999px; background: rgba(28, 28, 30, .82); color: #fff; font: 500 13px var(--font);
+    box-shadow: 0 6px 24px rgba(0, 0, 0, .35), inset 0 0 0 1px rgba(255, 255, 255, .08); backdrop-filter: blur(14px); transition: opacity .15s;
+  }
+  .pill kbd, #bar kbd { font: 600 11px var(--font); padding: 2px 6px; border-radius: 5px; background: rgba(255, 255, 255, .14); color: rgba(255, 255, 255, .8); }
+  .pill button { all: unset; cursor: pointer; padding: 4px 10px; border-radius: 999px; color: rgba(255, 255, 255, .85); }
+  .pill button:hover { background: rgba(255, 255, 255, .12); }
+  #bar {
+    position: fixed; display: none; align-items: center; gap: 4px; padding: 5px; border-radius: 16px; cursor: default;
+    background: rgba(28, 28, 30, .88); box-shadow: 0 10px 36px rgba(0, 0, 0, .45), inset 0 0 0 1px rgba(255, 255, 255, .08);
+    backdrop-filter: blur(16px); animation: pop .16s cubic-bezier(.2, .8, .2, 1);
+  }
+  @keyframes pop { from { opacity: 0; transform: translateY(4px) scale(.97); } to { opacity: 1; transform: none; } }
+  #bar button {
+    all: unset; cursor: pointer; display: flex; align-items: center; gap: 7px; height: 34px; padding: 0 12px; border-radius: 11px;
+    font: 600 13px var(--font); color: #fff; white-space: nowrap;
+  }
+  #bar button:hover { background: rgba(255, 255, 255, .1); }
+  #bar button.primary { background: linear-gradient(180deg, #2b8cff, #007aff); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .25); }
+  #bar button.primary:hover { filter: brightness(1.08); }
+  #bar button kbd { margin-left: 2px; }
+  #bar .sep { width: 1px; height: 20px; background: rgba(255, 255, 255, .14); margin: 0 3px; }
+  #bar.busy { opacity: .6; pointer-events: none; }
+</style></head>
+<body>
+<canvas id="bg"></canvas>
+<canvas id="fx"></canvas>
+<div class="pill" id="hint">Draw around anything <kbd>Esc</kbd><button id="cancel">Cancel</button></div>
+<div id="bar">
+  <button class="primary" data-a="ask" title="Ask Magpie about it">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20C4 10 10 4 20 4c0 10-6 16-16 16z"/><path d="M4 20l9-9"/></svg>Ask<kbd>↵</kbd></button>
+  <button data-a="lens" title="Search with Google Lens (opens your browser)">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>Google<kbd>G</kbd></button>
+  <button data-a="translate" title="Translate the text in it">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h9M8.5 3v2M6 5c.6 3.3 2.8 6 6 7.5M11 5c-.8 4-3.3 7-7 8.5"/><path d="M13 21l4-9 4 9M14.5 18h5"/></svg>Translate<kbd>T</kbd></button>
+  <button data-a="text" title="Copy the text in it">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3M9 20h6M12 4v16"/></svg>Copy text<kbd>C</kbd></button>
+  <span class="sep"></span>
+  <button data-a="cancel" title="Close (Esc)" aria-label="Close">
+    <svg width="12" height="12" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7"/></svg></button>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+const bg = $('bg'), fx = $('fx'), bar = $('bar'), hint = $('hint');
+const bctx = bg.getContext('2d'), fctx = fx.getContext('2d');
+let pts = [], drawing = false, sel = null, busy = false;
+
+// ---- the frozen screen (raw pixels from the main process, BGRA) ----
+magpie.on('snip:start', ({ width, height, data }) => {
+  reset();
+  bg.width = width; bg.height = height;
+  const px = new Uint8ClampedArray(data.buffer, data.byteOffset, data.byteLength);
+  for (let i = 0; i < px.length; i += 4) { const b = px[i]; px[i] = px[i + 2]; px[i + 2] = b; } // BGRA -> RGBA
+  bctx.putImageData(new ImageData(px, width, height), 0, 0);
+  sizeFx();
+  paint();
+  magpie.send('snip:drawn');
+});
+// once the window is really on screen: wait for two frames so the new picture is what appears
+magpie.on('snip:shown', () => requestAnimationFrame(() => requestAnimationFrame(() => magpie.send('snip:painted'))));
+magpie.on('snip:reset', reset);
+
+function reset() {
+  pts = []; drawing = false; sel = null; busy = false;
+  bar.style.display = 'none'; bar.classList.remove('busy');
+  hint.style.opacity = 1;
+  paint();
+}
+function sizeFx() {
+  const r = devicePixelRatio || 1;
+  fx.width = Math.round(innerWidth * r); fx.height = Math.round(innerHeight * r);
+  fctx.setTransform(r, 0, 0, r, 0, 0);
+}
+addEventListener('resize', () => { sizeFx(); paint(); });
+
+// ---- drawing ----
+function shapePath(c) {
+  c.beginPath();
+  if (sel && sel.kind === 'rect') { c.roundRect(sel.x, sel.y, sel.w, sel.h, 6); return; }
+  const p = sel ? sel.pts : pts;
+  if (!p.length) return;
+  c.moveTo(p[0][0], p[0][1]);
+  for (let i = 1; i < p.length; i++) c.lineTo(p[i][0], p[i][1]);
+  c.closePath();
+}
+function paint() {
+  const w = innerWidth, h = innerHeight;
+  fctx.clearRect(0, 0, w, h);
+  fctx.fillStyle = 'rgba(0, 0, 0, .42)';
+  fctx.fillRect(0, 0, w, h);
+  if (!pts.length && !sel) return;
+  // the chosen area shows at full brightness
+  fctx.save(); fctx.globalCompositeOperation = 'destination-out'; shapePath(fctx); fctx.fill(); fctx.restore();
+  fctx.save();
+  shapePath(fctx);
+  fctx.lineJoin = 'round'; fctx.lineCap = 'round';
+  fctx.shadowColor = 'rgba(10, 132, 255, .9)'; fctx.shadowBlur = 12;
+  fctx.strokeStyle = '#fff'; fctx.lineWidth = 2.5; fctx.stroke();
+  fctx.restore();
+}
+
+const area = (p) => { let a = 0; for (let i = 0, j = p.length - 1; i < p.length; j = i++) a += (p[j][0] + p[i][0]) * (p[j][1] - p[i][1]); return Math.abs(a / 2); };
+function bounds(p) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const [x, y] of p) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
+fx.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0 || busy) return;
+  fx.setPointerCapture(e.pointerId);
+  drawing = true; sel = null; pts = [[e.clientX, e.clientY]];
+  bar.style.display = 'none'; hint.style.opacity = 0;
+  paint();
+});
+fx.addEventListener('pointermove', (e) => {
+  if (!drawing) return;
+  const [lx, ly] = pts[pts.length - 1];
+  if (Math.hypot(e.clientX - lx, e.clientY - ly) < 2) return;
+  pts.push([e.clientX, e.clientY]);
+  paint();
+});
+fx.addEventListener('pointerup', () => {
+  if (!drawing) return;
+  drawing = false;
+  const b = bounds(pts);
+  if (b.w < 8 || b.h < 8) { pts = []; hint.style.opacity = 1; paint(); return; } // a click, not a selection
+  // A loop is a lasso; a quick diagonal drag (encloses almost nothing) means "this rectangle".
+  sel = area(pts) < 0.15 * b.w * b.h ? { kind: 'rect', ...b } : { kind: 'lasso', ...b, pts: pts.slice() };
+  pts = [];
+  paint();
+  showBar();
+});
+
+function showBar() {
+  bar.style.display = 'flex';
+  const bw = bar.offsetWidth, bh = bar.offsetHeight, m = 12;
+  let x = sel.x + sel.w / 2 - bw / 2;
+  x = Math.max(m, Math.min(x, innerWidth - bw - m));
+  let y = sel.y + sel.h + m;
+  if (y + bh > innerHeight - m) y = sel.y - bh - m; // no room below: above
+  if (y < m) y = sel.y + sel.h - bh - m; // no room either side: inside, at the bottom
+  bar.style.left = x + 'px'; bar.style.top = y + 'px';
+}
+
+// ---- actions ----
+// The bounding box of what you drew, cut from the full-resolution screen picture.
+async function cropPng() {
+  const k = bg.width / innerWidth;
+  const sx = Math.max(0, Math.floor(sel.x * k)), sy = Math.max(0, Math.floor(sel.y * k));
+  const sw = Math.min(bg.width - sx, Math.ceil(sel.w * k)), sh = Math.min(bg.height - sy, Math.ceil(sel.h * k));
+  const c = document.createElement('canvas');
+  c.width = sw; c.height = sh;
+  c.getContext('2d').drawImage(bg, sx, sy, sw, sh, 0, 0, sw, sh);
+  const blob = await new Promise((r) => c.toBlob(r, 'image/png'));
+  return new Uint8Array(await blob.arrayBuffer());
+}
+async function act(a) {
+  if (a === 'cancel') return magpie.send('snip:cancel');
+  if (!sel || busy) return;
+  busy = true; bar.classList.add('busy');
+  magpie.send('snip:action', { action: a, png: await cropPng() });
+}
+bar.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) act(b.dataset.a); });
+$('cancel').onclick = () => magpie.send('snip:cancel');
+addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') return magpie.send('snip:cancel');
+  if (!sel || e.ctrlKey && e.key.toLowerCase() !== 'c' || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (e.key === 'Enter' || k === 'a') act('ask');
+  else if (k === 'g') act('lens');
+  else if (k === 't') act('translate');
+  else if (k === 'c') act('text'); // also Ctrl+C
+});
+addEventListener('contextmenu', (e) => { e.preventDefault(); magpie.send('snip:cancel'); }); // right-click cancels too
+</script></body></html>

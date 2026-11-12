@@ -142,6 +142,7 @@
 
   <div class="group"><h3>Ask</h3><div class="list">
     <div class="row"><div class="l"><b>Shortcut</b><small>Opens the prompt box from any app.</small></div><button class="btn" id="hk">…</button></div>
+    <div class="row"><div class="l"><b>Snip shortcut</b><small>Draw around anything on screen to ask about it, search it with Google Lens, translate it, or copy its text.</small></div><button class="btn" id="hk2">…</button></div>
     <div class="row"><div class="l"><b>“Ask Magpie” button</b><small>Appears next to text you highlight.</small></div><label class="switch"><input type="checkbox" id="showAskButton"><i></i></label></div>
   </div></div>
 
@@ -167,7 +168,7 @@
     <div class="row"><div class="l"><b>Selection button</b><small id="st-hook">Checking…</small></div></div>
     <div class="row"><div class="l"><b>Data folder</b><small id="st-dir"></small></div></div>
   </div></div>
-  <p class="note">Everything stays on this PC. Screenshots are never sent anywhere. To answer, Magpie sends your chosen AI engine your question, the selected text, and only the app name and window title you have switched on above.</p>
+  <p class="note">Everything stays on this PC. History screenshots are never sent anywhere. To answer, Magpie sends your chosen AI engine your question, the selected text, and only the app name and window title you have switched on above. A snip is sent to your AI engine only when you ask about it or translate it, and to Google only when you choose Google Lens. Copy text reads the text on this PC.</p>
 </div></section>
 </main>
 
@@ -251,6 +252,7 @@ function fill() {
   document.querySelectorAll('#set input[type=checkbox]').forEach((el) => (el.checked = !!getPath(el.id)));
   document.querySelectorAll('#seg-shot button').forEach((b) => b.classList.toggle('on', b.dataset.v === settings.log.screenshot));
   $('hk').textContent = pretty(settings.hotkey);
+  $('hk2').textContent = pretty(settings.snipHotkey || '');
   $('vp').textContent = settings.vaultPath; $('vp').title = settings.vaultPath;
   $('hkhint').innerHTML = `<kbd>${esc(pretty(settings.hotkey))}</kbd> to ask from anywhere`;
   document.querySelectorAll('.row.dep').forEach((r) => r.classList.toggle('off', !settings.log.enabled));
@@ -405,9 +407,14 @@ function toAccel(e) {
   if (!mods.length && !/^F\d/.test(key)) return { error: 'Include Ctrl, Alt, Shift or Win.' };
   return { accel: [...mods, key].join('+') };
 }
-function stopRec() { recording = false; $('hk').classList.remove('rec'); $('hk').textContent = pretty(settings.hotkey); }
-$('hk').onclick = () => { recording = true; $('hk').classList.add('rec'); $('hk').textContent = 'Press the new shortcut…'; $('hk').focus(); };
-$('hk').addEventListener('blur', () => recording && stopRec());
+// Two shortcut buttons share one recorder: recTarget is the one being recorded.
+const SHORTCUTS = { hk: { key: 'hotkey', channel: 'settings:hotkey' }, hk2: { key: 'snipHotkey', channel: 'settings:snipHotkey' } };
+let recTarget = 'hk';
+function stopRec() { recording = false; $(recTarget).classList.remove('rec'); $(recTarget).textContent = pretty(settings[SHORTCUTS[recTarget].key] || ''); }
+for (const id of Object.keys(SHORTCUTS)) {
+  $(id).onclick = () => { if (recording) stopRec(); recTarget = id; recording = true; $(id).classList.add('rec'); $(id).textContent = 'Press the new shortcut…'; $(id).focus(); };
+  $(id).addEventListener('blur', () => recording && recTarget === id && stopRec());
+}
 addEventListener('keyup', (e) => { if (e.code === 'AltRight') rightAlt = false; }, true);
 addEventListener('blur', () => (rightAlt = false));
 addEventListener('keydown', async (e) => {
@@ -418,10 +425,11 @@ addEventListener('keydown', async (e) => {
   if (e.key === 'Escape') return stopRec();
   const r = toAccel(e);
   if (!r) return;
-  if (r.error) { $('hk').textContent = r.error; return; }
-  const res = await magpie.invoke('settings:hotkey', r.accel);
-  if (res.ok) { settings.hotkey = r.accel; stopRec(); fill(); }
-  else { recording = false; $('hk').classList.remove('rec'); $('hk').textContent = 'Not available'; $('hk').title = res.error; alert(res.error); setTimeout(stopRec, 100); }
+  const target = recTarget, sc = SHORTCUTS[target];
+  if (r.error) { $(target).textContent = r.error; return; }
+  const res = await magpie.invoke(sc.channel, r.accel);
+  if (res.ok) { settings[sc.key] = r.accel; stopRec(); fill(); }
+  else { recording = false; $(target).classList.remove('rec'); $(target).textContent = 'Not available'; $(target).title = res.error; alert(res.error); setTimeout(stopRec, 100); }
 }, true);
 
 async function loadStatus() {

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, screen, nativeImage, nativeTheme, shell, dialog, powerMonitor } = require('electron');
+const { app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain, screen, nativeImage, nativeTheme, shell, dialog, powerMonitor, clipboard, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -11,6 +11,7 @@ const vault = require('./vault');
 const sysinfo = require('./sysinfo');
 const win32 = require('./win32');
 const updater = require('./updater');
+const lens = require('./lens');
 
 const ICON = path.join(__dirname, '..', 'assets', 'icon.png');
 const PRELOAD = path.join(__dirname, 'preload.js');
@@ -145,15 +146,17 @@ function attachShot(win, file) {
 
 // `late: true` (shortcut or Ask button, another app in front): the popup appears at once WITHOUT taking the
 // keyboard, because the other app must still have it while we read the selection. gatherAndOpen finishes the job.
-async function openQuick({ question = '', selection = '', app: appInfo = {}, shot = null, parent = null, from = null, mode = 'center', offset = 0, autoAsk = false, late = false, hold = null } = {}) {
-  const fromOtherApp = !BrowserWindow.getFocusedWindow();
+// `snip`: a region drawn with the snip shortcut ({ thumb, mode, ocr, img, ... }); `gather`: resolves once its text is read.
+async function openQuick({ question = '', selection = '', app: appInfo = {}, shot = null, parent = null, from = null, mode = 'center', offset = 0, autoAsk = false, late = false, hold = null, snip = null, gather = null } = {}) {
+  // after a snip our overlay just vanished, so Windows may think no app of ours is in front: always ask properly
+  const fromOtherApp = !!snip || !BrowserWindow.getFocusedWindow();
   const { x, y } = placeFor(mode, offset);
   const win = await takeQuickWindow();
   trace('popup window ready');
   win.setBounds({ x, y, width: QUICK_W, height: 64 });
   let finishGather = () => {};
-  const gathered = late ? new Promise((r) => (finishGather = r)) : Promise.resolve();
-  const ctx = { app: appInfo, shot, selection, parent, from, title: titleFor(question, selection), entryId: null, job: null, tween: null, asked: false, gathered, finishGather, fromOtherApp, pos: { x, y }, answer: '', question };
+  const gathered = gather || (late ? new Promise((r) => (finishGather = r)) : Promise.resolve());
+  const ctx = { app: appInfo, shot, selection, parent, from, title: titleFor(question, selection), entryId: null, job: null, tween: null, asked: false, gathered, finishGather, fromOtherApp, pos: { x, y }, answer: '', question, snip };
   quickCtx.set(win, ctx);
   // Where the popup should be. Only the user dragging it changes this; it is never read back from the window,
   // because at fractional display scaling every read-back is off by a pixel and the errors add up.
@@ -168,7 +171,7 @@ async function openQuick({ question = '', selection = '', app: appInfo = {}, sho
     quickCtx.delete(win);
   });
   const cfg = store.currentProvider();
-  win.webContents.send('init', { question, selection, parent, autoAsk, app: appInfo, hasShot: !!shot, engine: engineLabel(cfg) });
+  win.webContents.send('init', { question, selection, parent, autoAsk, app: appInfo, hasShot: !!shot, engine: engineLabel(cfg), snip: snip ? { thumb: snip.thumb, mode: snip.mode } : null });
   if (hold) {
     // whole-screen screenshots must be taken before the popup covers anything
     const f = await hold;
@@ -374,6 +377,7 @@ function setAltGrFallback(accel) {
 }
 
 function registerHotkey(accel) {
+  if (accel === currentSnipHotkey) return { ok: false, error: 'That is already the Snip shortcut. Pick a different one.' };
   const prev = currentHotkey;
   if (prev) globalShortcut.unregister(prev);
   let ok = false;
@@ -427,6 +431,7 @@ function hideAskButton() {
   if (askBtn && !askBtn.isDestroyed() && askBtn.isVisible()) askBtn.hide();
 }
 function showAskButton(px, py) {
+  if (snipOpen) return;
   if (!askBtn || askBtn.isDestroyed() || askBtn.webContents.isCrashed()) {
     if (askBtn && !askBtn.isDestroyed()) askBtn.destroy();
     createAskButton(); // ready for the next selection
@@ -490,20 +495,220 @@ function startInputHooks() {
   }
 }
 
+// ---------------------------------------------------------------- snip: draw around anything on screen
+// The snip shortcut freezes the screen under the cursor in a full-screen overlay (snip.html). You draw a loop
+// (or drag a rectangle) and choose: Ask, Google Lens, Translate or Copy text. The overlay window is kept loaded
+// and hidden, like the popup spare, so it appears at once.
+let snipWin = null;
+let snipReady = null;
+let snipOpen = false;
+let snipApp = null; // the app that was in front when the shortcut was pressed
+let snipDrawn = null, snipPainted = null; // resolvers for the overlay's "picture drawn" / "on screen" replies
+function createSnipWindow() {
+  if (snipWin && !snipWin.isDestroyed()) return;
+  const win = new BrowserWindow({
+    show: false, frame: false, skipTaskbar: true, resizable: false, movable: false, minimizable: false, maximizable: false,
+    fullscreenable: false, alwaysOnTop: true, hasShadow: false, backgroundColor: '#000000', title: 'Magpie snip',
+    webPreferences: { preload: PRELOAD, contextIsolation: true, backgroundThrottling: false },
+  });
+  win.setAlwaysOnTop(true, 'screen-saver');
+  snipReady = new Promise((r) => win.webContents.once('did-finish-load', r));
+  win.loadFile(UI('snip.html'));
+  // The very first time a window is shown, Windows and Chromium set up its drawing surfaces (~180 ms). Do that
+  // now, off-screen, tiny and invisible, so the first real snip is as quick as every later one.
+  snipReady.then(() => {
+    if (win.isDestroyed() || snipOpen) return;
+    win.setOpacity(0);
+    win.setBounds({ x: -32000, y: -32000, width: 64, height: 64 });
+    win.showInactive();
+    setTimeout(() => !win.isDestroyed() && !snipOpen && win.hide(), 400);
+  });
+  win.on('blur', () => snipOpen && snipWin === win && cancelSnip()); // switched away (Alt+Tab, Win key): put the screen back
+  win.webContents.on('render-process-gone', () => {
+    if (quitting) return;
+    if (snipWin === win) { snipWin = null; snipOpen = false; }
+    win.destroy();
+  });
+  snipWin = win;
+}
+function cancelSnip() {
+  snipOpen = false;
+  snipDrawn?.();
+  snipPainted?.();
+  if (snipWin && !snipWin.isDestroyed()) {
+    snipWin.hide();
+    snipWin.webContents.send('snip:reset');
+  }
+}
+async function toggleSnip() {
+  if (snipOpen) return cancelSnip();
+  createSnipWindow();
+  hideAskButton();
+  const d = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  snipApp = sysinfo.native ? win32.foreground() : await sysinfo.activeWindow();
+  const shot = await sysinfo.captureDisplay(d); // before anything of ours is on screen
+  trace('snip: screen captured');
+  if (!shot) return;
+  snipOpen = true;
+  const win = snipWin;
+  await snipReady;
+  if (!snipOpen || win.isDestroyed()) return;
+  // draw the picture while the window is still hidden, then show it see-through for a frame or two, so the
+  // previous snip never flashes up
+  await new Promise((r) => { snipDrawn = r; setTimeout(r, 500); win.webContents.send('snip:start', shot); });
+  trace('snip: picture drawn');
+  if (!snipOpen || win.isDestroyed()) return;
+  win.setOpacity(0);
+  win.setBounds(d.bounds);
+  win.show();
+  win.setBounds(d.bounds); // again: moving between displays with different scaling can resize it on the way
+  await new Promise((r) => { snipPainted = r; setTimeout(r, 150); win.webContents.send('snip:shown'); });
+  trace('snip: picture on screen');
+  if (!snipOpen || win.isDestroyed()) return;
+  win.setOpacity(1);
+  await sysinfo.focusWindow(win.getNativeWindowHandle()); // the keyboard, for Esc and the action keys
+  if (!snipOpen || win.isDestroyed()) return;
+  win.focus();
+  win.webContents.focus();
+  trace('snip: overlay on screen');
+}
+
+// The language answers are translated into: the first language Windows is set to (by name, e.g. "English").
+function systemLanguage() {
+  try {
+    const tag = (app.getPreferredSystemLanguages()[0] || app.getLocale() || 'en').split('-')[0];
+    return new Intl.DisplayNames(['en'], { type: 'language' }).of(tag) || 'English';
+  } catch {
+    return 'English';
+  }
+}
+
+// The image as sent to the AI: at most 1568 px on its long side (what the APIs accept without shrinking it
+// themselves), as JPEG to keep the request small.
+function snipImage(snip) {
+  if (!snip.image) {
+    let img = snip.img;
+    const { width, height } = img.getSize();
+    if (Math.max(width, height) > 1568) img = img.resize(width >= height ? { width: 1568, quality: 'best' } : { height: 1568, quality: 'best' });
+    snip.image = { mime: 'image/jpeg', data: img.toJPEG(88).toString('base64') };
+  }
+  return snip.image;
+}
+
+async function openSnipQuick({ file, png, app: appInfo, mode }) {
+  const img = nativeImage.createFromBuffer(png);
+  const { width, height } = img.getSize();
+  const k = Math.min(1, 480 / width, 112 / height); // the thumbnail is shown at half this size, so it stays sharp
+  const thumb = img.resize({ width: Math.max(1, Math.round(width * k)), quality: 'best' }).toDataURL();
+  const snip = { file, img, mode, thumb, ocr: '', image: null };
+  // read the text while the popup appears; asking waits for it (see quick:ask)
+  const reading = sysinfo.ocr(path.join(store.shotsDir(), file)).catch((err) => {
+    trace('snip: text could not be read: ' + err.message);
+    return '';
+  });
+  const gather = reading.then((text) => { snip.ocr = text; });
+  const win = await openQuick({ shot: file, app: appInfo, snip, gather });
+  trace('snip: popup open');
+  await gather;
+  trace('snip: text read');
+  if (win.isDestroyed() || quickCtx.get(win)?.snip !== snip) return;
+  if (mode === 'text' && snip.ocr) clipboard.writeText(snip.ocr);
+  win.webContents.send('snip:ocr', { text: snip.ocr, copied: mode === 'text' && !!snip.ocr });
+}
+
+// Google Lens: upload and open the results. If that fails, the snip goes on the clipboard and Google Images opens,
+// where Ctrl+V searches with it.
+async function snipLens(png) {
+  try {
+    const url = await lens.upload(png);
+    trace('snip: Google Lens results ready');
+    await shell.openExternal(url);
+  } catch (err) {
+    trace('snip: Google Lens upload failed: ' + err.message);
+    clipboard.writeImage(nativeImage.createFromBuffer(png));
+    shell.openExternal('https://images.google.com/');
+    if (Notification.isSupported()) {
+      new Notification({ title: 'Google Lens upload didn\'t work', body: 'Your snip is on the clipboard. On Google Images, click the camera icon and press Ctrl+V.', icon: ICON }).show();
+    }
+  }
+}
+
+ipcMain.on('snip:drawn', () => { snipDrawn?.(); snipDrawn = null; });
+ipcMain.on('snip:painted', () => { snipPainted?.(); snipPainted = null; });
+ipcMain.on('snip:cancel', () => cancelSnip());
+ipcMain.on('snip:action', (_, { action, png }) => {
+  const appInfo = snipApp || {};
+  cancelSnip();
+  if (!png || !['ask', 'lens', 'translate', 'text'].includes(action)) return;
+  const buf = Buffer.from(png);
+  T0 = Date.now();
+  trace('snip: ' + action);
+  if (action === 'lens') return void snipLens(buf); // nothing is kept on disk for a Lens search
+  const file = newId() + '.png';
+  fs.writeFileSync(path.join(store.shotsDir(), file), buf);
+  openSnipQuick({ file, png: buf, app: appInfo, mode: action });
+});
+
+// The snip shortcut. Holding it makes Windows repeat it; one press must open (or close) the overlay only once.
+let currentSnipHotkey = null;
+let snipVk = null;
+let snipKeyDown = false;
+let snipKeyTimer = null;
+function fireSnip() {
+  if (snipKeyDown) return;
+  snipKeyDown = true;
+  clearInterval(snipKeyTimer);
+  if (sysinfo.native && snipVk != null) {
+    snipKeyTimer = setInterval(() => {
+      if (!win32.anyDown([snipVk])) {
+        snipKeyDown = false;
+        clearInterval(snipKeyTimer);
+      }
+    }, 25);
+  } else snipKeyTimer = setTimeout(() => (snipKeyDown = false), 700);
+  T0 = Date.now();
+  trace('snip shortcut fired');
+  toggleSnip();
+}
+function registerSnipHotkey(accel) {
+  if (accel === currentHotkey) return { ok: false, error: 'That is already the Ask shortcut. Pick a different one.' };
+  const prev = currentSnipHotkey;
+  if (prev) globalShortcut.unregister(prev);
+  let ok = false;
+  try {
+    ok = globalShortcut.register(accel, fireSnip);
+  } catch {
+    ok = false;
+  }
+  if (ok) {
+    currentSnipHotkey = accel;
+    snipVk = vkFor(accel);
+    return { ok: true };
+  }
+  if (prev) globalShortcut.register(prev, fireSnip);
+  return {
+    ok: false,
+    error: /^Control\+Alt\+[A-Z0-9]$/.test(accel)
+      ? 'Windows or another app won\'t let Magpie use that shortcut (on some keyboards Ctrl+Alt+letter types a special character). Try another.'
+      : 'Another app is already using that shortcut. Try a different one.',
+  };
+}
+
 // ---------------------------------------------------------------- IPC: quick window
-ipcMain.on('quick:ask', async (e, { question }) => {
+ipcMain.on('quick:ask', async (e, { question, mode }) => {
   const win = BrowserWindow.fromWebContents(e.sender);
   const ctx = quickCtx.get(win);
   if (!ctx) return;
   ctx.asked = true;
-  // asked before the selection was read (rare, it takes a fraction of a second): wait for it
-  await Promise.race([ctx.gathered, new Promise((r) => setTimeout(r, 3000))]);
+  // asked before the selection (or the snip's text) was read: wait for it
+  await Promise.race([ctx.gathered, new Promise((r) => setTimeout(r, ctx.snip ? 15000 : 3000))]);
   if (!quickCtx.has(win) || e.sender.isDestroyed()) return;
   const s = store.getSettings();
   const cfg = store.currentProvider();
   ctx.job?.cancel();
   ctx.asked = true;
-  ctx.title = titleFor(question, ctx.selection);
+  const translate = mode === 'translate';
+  ctx.title = ctx.snip ? titleFor(translate ? '' : question, ctx.snip.ocr || 'Snip') : titleFor(question, ctx.selection);
   ctx.question = question;
   const sender = e.sender;
   const job = engine.explain(
@@ -513,6 +718,9 @@ ipcMain.on('quick:ask', async (e, { question }) => {
       from: ctx.from && question === ctx.from.term ? ctx.from : null,
       // only share what the user has switched on in Settings
       app: ctx.from ? {} : { process: s.log.appName ? ctx.app.process : '', title: s.log.windowTitle ? ctx.app.title : '' },
+      snip: ctx.snip ? { image: snipImage(ctx.snip), ocr: ctx.snip.ocr } : null,
+      mode: translate ? 'translate' : undefined,
+      target: systemLanguage(),
     },
     (c) => !sender.isDestroyed() && sender.send('delta', c),
     cfg
@@ -524,7 +732,8 @@ ipcMain.on('quick:ask', async (e, { question }) => {
       ctx.answer = answer;
       if (s.log.enabled) {
         const entry = store.addEntry({
-          id: newId(), ts: Date.now(), question, selection: s.log.selectedText ? ctx.selection : '',
+          // a snip translation is listed by its text, not as yet another "Translate"
+          id: newId(), ts: Date.now(), question: translate && ctx.snip ? `Translate: ${(ctx.snip.ocr || '').replace(/\s+/g, ' ').slice(0, 60)}` : question, selection: s.log.selectedText ? ctx.selection || ctx.snip?.ocr || '' : '',
           answer, app: s.log.appName ? ctx.app.process || '' : '', title: s.log.windowTitle ? ctx.app.title || '' : '',
           shot: ctx.shot || null, parent: ctx.parent || null, model: engineLabel(cfg), saved: null,
         });
@@ -571,7 +780,16 @@ ipcMain.on('quick:resize', (e, target) => {
 ipcMain.on('quick:dismiss', (e) => BrowserWindow.fromWebContents(e.sender)?.close());
 ipcMain.on('quick:clearSel', (e) => {
   const ctx = quickCtx.get(BrowserWindow.fromWebContents(e.sender));
-  if (ctx) ctx.selection = '';
+  if (!ctx) return;
+  ctx.selection = '';
+  if (ctx.snip) {
+    // the snip is gone from the question, so it isn't kept as this question's screenshot either
+    if (ctx.shot === ctx.snip.file) {
+      fs.rmSync(path.join(store.shotsDir(), ctx.shot), { force: true });
+      ctx.shot = null;
+    }
+    ctx.snip = null;
+  }
 });
 ipcMain.on('quick:dig', (e, { term }) => {
   const ctx = quickCtx.get(BrowserWindow.fromWebContents(e.sender));
@@ -628,6 +846,11 @@ ipcMain.handle('settings:set', (_, patch) => {
 ipcMain.handle('settings:hotkey', (_, accel) => {
   const r = registerHotkey(accel);
   if (r.ok) store.setSettings({ hotkey: accel });
+  return r;
+});
+ipcMain.handle('settings:snipHotkey', (_, accel) => {
+  const r = registerSnipHotkey(accel);
+  if (r.ok) store.setSettings({ snipHotkey: accel });
   return r;
 });
 ipcMain.handle('settings:pickVault', async () => {
@@ -717,7 +940,7 @@ if (process.env.MAGPIE_TEST_SEAMS) {
 ipcMain.handle('app:status', () =>
   new Promise((resolve) => {
     execFile('claude', ['--version'], { windowsHide: true, timeout: 8000 }, (err, out) =>
-      resolve({ claude: err ? null : out.trim(), version: app.getVersion(), packaged: app.isPackaged, hook: hookRunning, dataDir: app.getPath('userData') })
+      resolve({ claude: err ? null : out.trim(), version: app.getVersion(), packaged: app.isPackaged, hook: hookRunning, snipHotkey: currentSnipHotkey, dataDir: app.getPath('userData') })
     );
   })
 );
@@ -738,15 +961,27 @@ if (!app.requestSingleInstanceLock()) {
       Menu.buildFromTemplate([
         { label: 'Open Magpie', click: () => showMain() },
         { label: 'Ask a question', click: () => toggleAsk() },
+        { label: 'Snip and search', click: () => toggleSnip() },
         { label: 'Open vault folder', click: () => shell.openPath(vault.vaultDir()) },
         { type: 'separator' },
         { label: 'Quit', click: () => app.quit() },
       ])
     );
     const r = registerHotkey(store.getSettings().hotkey);
+    // If the default snip shortcut is already taken by another app, use the first free fallback (and save it, so
+    // Settings shows the shortcut that really works). A shortcut the user picked is never changed.
+    const snipAccel = store.getSettings().snipHotkey;
+    if (!registerSnipHotkey(snipAccel).ok) {
+      trace('snip shortcut unavailable: ' + snipAccel);
+      if (snipAccel === store.DEFAULTS.snipHotkey) {
+        const free = ['Alt+Shift+M', 'Control+Alt+N', 'Alt+Shift+S'].find((a) => registerSnipHotkey(a).ok);
+        if (free) store.setSettings({ snipHotkey: free });
+      }
+    }
     createAskButton();
     startInputHooks();
     setTimeout(prepareSpare, 1500); // have the first popup loaded and waiting before the shortcut is first used
+    setTimeout(createSnipWindow, 2500); // same for the snip overlay
     setTimeout(() => sysinfo.warmUp(), 2500);
     // After sleep or the lock screen Windows may have removed the input hook and missed key releases. Start fresh,
     // so the first shortcut after opening the laptop behaves like any other.

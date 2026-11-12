@@ -7,6 +7,7 @@ const providers = require('./providers');
 
 const DEFAULTS = {
   hotkey: 'Control+Alt+R',
+  snipHotkey: 'Control+Alt+M', // draw around anything on screen to ask, search, translate or copy its text
   showAskButton: true,
   vaultPath: path.join(os.homedir(), 'Magpie-Vault'),
   openAtLogin: false,
@@ -156,5 +157,5 @@ function clearHistory() {
 
 module.exports = {
   getSettings, setSettings, publicSettings, setSecret, currentProvider, setModelCache, getModelCache,
-  getHistory, addEntry, updateEntry, deleteEntry, clearHistory, shotsDir,
+  getHistory, addEntry, updateEntry, deleteEntry, clearHistory, shotsDir, DEFAULTS,
 };
